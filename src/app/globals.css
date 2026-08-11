@@ -1,0 +1,187 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================
+   Signal Design System — tokens only. No inline hex anywhere.
+   ============================================================ */
+
+@theme inline {
+  /* shadcn/ui semantic mappings (kept for component compatibility) */
+  --color-background: var(--canvas);
+  --color-foreground: var(--text);
+  --color-card: var(--surface);
+  --color-card-foreground: var(--text);
+  --color-popover: var(--surface);
+  --color-popover-foreground: var(--text);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--surface-sunk);
+  --color-secondary-foreground: var(--text);
+  --color-muted: var(--surface-sunk);
+  --color-muted-foreground: var(--text-muted);
+  --color-accent: var(--primary-soft);
+  --color-accent-foreground: var(--primary);
+  --color-destructive: var(--risk);
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--border);
+  --color-input: var(--surface-sunk);
+  --color-ring: var(--primary);
+  --color-sidebar: var(--surface);
+  --color-sidebar-foreground: var(--text);
+  --color-sidebar-primary: var(--primary);
+  --color-sidebar-primary-foreground: #ffffff;
+  --color-sidebar-accent: var(--primary-soft);
+  --color-sidebar-accent-foreground: var(--primary);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-ring: var(--primary);
+
+  /* Signal-specific tokens (intent + status) */
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-sunk: var(--surface-sunk);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-primary-soft: var(--primary-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-risk: var(--risk);
+  --color-info: var(--info);
+
+  --color-intent-high: var(--primary);
+  --color-intent-medium: var(--warning);
+  --color-intent-low: var(--text-muted);
+  --color-intent-none: var(--text-muted);
+  --color-intent-risk: var(--risk);
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+}
+
+:root {
+  /* Light theme — warm off-white editorial */
+  --canvas: #FAF9F6;
+  --surface: #FFFFFF;
+  --surface-sunk: #F4F2ED;
+  --border: #E6E2DA;
+  --text: #1C1B19;
+  --text-muted: #6B6862;
+  --primary: #0F766E;
+  --primary-foreground: #FFFFFF;
+  --primary-soft: #E6F2F0;
+  --success: #15803D;
+  --warning: #B45309;
+  --risk: #B4405A;
+  --info: #1D4ED8;
+
+  --radius: 12px;
+
+  /* sidebar shadcn aliases */
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: var(--primary-soft);
+  --sidebar-accent-foreground: var(--primary);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--primary);
+}
+
+.dark {
+  /* Dark theme — charcoal, NOT pure black */
+  --canvas: #16181A;
+  --surface: #1E2124;
+  --surface-sunk: #262A2E;
+  --border: #32373C;
+  --text: #F2F0EC;
+  --text-muted: #9AA0A6;
+  --primary: #2DD4BF;
+  --primary-foreground: #0F1A18;
+  --primary-soft: #1B2D2B;
+  --success: #4ADE80;
+  --warning: #FBBF24;
+  --risk: #F4728E;
+  --info: #60A5FA;
+
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: #0F1A18;
+  --sidebar-accent: var(--primary-soft);
+  --sidebar-accent-foreground: var(--primary);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--primary);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--canvas);
+    color: var(--text);
+    font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* Visible 2px focus ring on every control */
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* Tabular numerals for IDs & scores */
+  .font-mono, [data-num] {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 999px;
+    border: 2px solid var(--canvas);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+  /* Reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* Shadow utilities (signal tokens) */
+@utility shadow-sm-signal {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+}
+@utility shadow-md-signal {
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.06);
+}
+@utility shadow-lg-signal {
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.10);
+}
+
+/* Score arc progress */
+@utility score-arc-bg {
+  background: conic-gradient(from -90deg, var(--ring-color, var(--primary)) calc(var(--score-pct, 0) * 1%), var(--border) 0);
+}
