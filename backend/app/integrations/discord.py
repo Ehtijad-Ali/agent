@@ -18,6 +18,7 @@ ingestion on a schedule, and avoids holding a persistent connection.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -30,6 +31,23 @@ from app.utils.hashing import pseudonymise
 logger = logging.getLogger(__name__)
 
 API_ROOT = "https://discord.com/api/v10"
+
+
+
+def _retry_after(response: httpx.Response) -> float:
+    """Seconds to wait from a 429. Discord sends Retry-After (and a JSON
+    retry_after); default to a short pause and cap it so a bad header cannot
+    stall ingestion for minutes."""
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        try:
+            raw = response.json().get("retry_after")
+        except ValueError:
+            raw = None
+    try:
+        return max(0.0, min(float(raw), 10.0))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 class DiscordError(RuntimeError):
@@ -57,25 +75,50 @@ class DiscordConnector(PlatformConnector):
             "User-Agent": "SignalBot (https://joinallbettors.example, 0.1)",
         }
 
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+        attempts: int = 3,
+    ) -> Any:
+        """One API call, honouring Discord's per-route rate limits.
+
+        Discord's buckets are narrow and short: two calls to the same route in
+        quick succession routinely return 429 with Retry-After under a second.
+        Treating that as a hard failure made the connector fall over on its own
+        second request, so a 429 is waited out and retried rather than raised.
+        """
+        label = f"{method} {path}"
+        for attempt in range(attempts):
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                try:
+                    response = await client.request(
+                        method,
+                        f"{API_ROOT}{path}",
+                        headers=self._headers,
+                        params=params or None,
+                        json=payload,
+                    )
+                except httpx.HTTPError as exc:
+                    raise DiscordError(f"{label}: transport error: {exc}") from exc
+
+            if response.status_code == 429 and attempt < attempts - 1:
+                delay = _retry_after(response)
+                logger.info("%s rate limited, waiting %.2fs", label, delay)
+                await asyncio.sleep(delay)
+                continue
+            return self._handle(response, label)
+
+        raise DiscordError(f"{label}: still rate limited after {attempts} attempts")
+
     async def _get(self, path: str, **params: Any) -> Any:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            try:
-                response = await client.get(
-                    f"{API_ROOT}{path}", headers=self._headers, params=params or None
-                )
-            except httpx.HTTPError as exc:
-                raise DiscordError(f"GET {path}: transport error: {exc}") from exc
-        return self._handle(response, f"GET {path}")
+        return await self._request("GET", path, params=params)
 
     async def _post(self, path: str, payload: dict[str, Any]) -> Any:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            try:
-                response = await client.post(
-                    f"{API_ROOT}{path}", headers=self._headers, json=payload
-                )
-            except httpx.HTTPError as exc:
-                raise DiscordError(f"POST {path}: transport error: {exc}") from exc
-        return self._handle(response, f"POST {path}")
+        return await self._request("POST", path, payload=payload)
 
     @staticmethod
     def _handle(response: httpx.Response, label: str) -> Any:
