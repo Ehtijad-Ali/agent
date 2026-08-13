@@ -116,16 +116,81 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 app.include_router(health.router, prefix="/api")
 app.include_router(engine.router, prefix="/api")
 
+# Documented in the spec but not built yet. Without these a request to
+# /api/conversations returns a bare 404, which is indistinguishable from a
+# typo. 501 with a phase number says "this is coming", not "you got the URL
+# wrong". Removed as each route lands.
+PENDING_ROUTES: dict[str, int] = {
+    "/api/auth": 2,
+    "/api/conversations": 2,
+    "/api/activity": 2,
+    "/api/replies": 6,
+    "/api/insights": 8,
+    "/api/scans": 5,
+    "/api/platforms": 5,
+    "/api/safety": 4,
+}
+
+
+@app.get("/", include_in_schema=False)
+async def index():
+    """Opening the base URL in a browser should land somewhere useful rather
+    than on a 404."""
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(url="/docs")
+
 
 @app.get("/api", tags=["meta"])
-async def root() -> dict:
+async def api_root() -> dict:
     return {
         "name": "Signal API",
         "version": app.version,
         "phase": 1,
         "docs": "/docs",
-        "available": ["/api/health", "/api/tuning", "/api/tuning/preview",
-                      "/api/playground/analyze"],
-        "pending": ["/api/auth/*", "/api/conversations/*", "/api/replies/*",
-                    "/api/insights/*", "/api/activity", "/api/scans/*"],
+        "available": [
+            "/api/health",
+            "/api/health/ai",
+            "/api/health/platforms",
+            "/api/tuning",
+            "/api/tuning/preview",
+            "/api/tuning/non-negotiables",
+            "/api/playground/analyze",
+        ],
+        "pending": {path: f"phase {phase}" for path, phase in PENDING_ROUTES.items()},
     }
+
+
+@app.api_route(
+    "/api/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
+)
+async def not_yet_implemented(path: str):
+    """Catch-all for /api. Distinguishes 'planned' from 'wrong URL'."""
+    full = f"/api/{path}".rstrip("/")
+    for prefix, phase in PENDING_ROUTES.items():
+        if full == prefix or full.startswith(prefix + "/"):
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "success": False,
+                    "error": {
+                        "code": "NOT_IMPLEMENTED",
+                        "message": (
+                            f"{prefix} is specified but not built yet "
+                            f"(phase {phase}). See GET /api for what is live."
+                        ),
+                    },
+                },
+            )
+    return JSONResponse(
+        status_code=404,
+        content={
+            "success": False,
+            "error": {
+                "code": "HTTP_404",
+                "message": f"No route for {full}. See GET /api or /docs.",
+            },
+        },
+    )
