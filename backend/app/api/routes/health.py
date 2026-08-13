@@ -11,6 +11,8 @@ import httpx
 from fastapi import APIRouter
 
 from app.core.config import get_settings
+from app.integrations.base import FACEBOOK_REASON, REDDIT_REASON
+from app.integrations.telegram import TelegramConnector
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -59,24 +61,57 @@ async def health_ai() -> dict:
 
 @router.get("/platforms")
 async def health_platforms() -> dict:
-    """Spec §29: credential *status* only. Tokens never leave this process."""
+    """Spec §29: credential *status* only. Tokens never leave this process.
+
+    Telegram is probed for real rather than reported as "configured" just
+    because a token string exists -- a revoked token would otherwise look
+    healthy right up until ingestion silently returned nothing.
+    """
     settings = get_settings()
-    return {
-        "platforms": [
+    platforms: list[dict] = []
+
+    if settings.telegram_bot_token and settings.pseudonym_salt:
+        connector = TelegramConnector(settings.telegram_bot_token, settings.pseudonym_salt)
+        status = await connector.health_check()
+        platforms.append(
             {
                 "platform": "telegram",
-                "status": "configured" if settings.telegram_bot_token else "not_connected",
-                "lastChecked": None,
-                "error": None,
-            },
+                "status": status.status,
+                "lastChecked": status.last_checked.isoformat() if status.last_checked else None,
+                "error": status.error,
+                "detail": status.detail,
+            }
+        )
+    else:
+        missing = "TELEGRAM_BOT_TOKEN" if not settings.telegram_bot_token else "PSEUDONYM_SALT"
+        platforms.append(
             {
-                "platform": "discord",
-                "status": "configured" if settings.discord_bot_token else "not_connected",
+                "platform": "telegram",
+                "status": "not_connected",
                 "lastChecked": None,
                 "error": None,
-            },
-            # Spec §46: do not claim these are production-connected.
-            {"platform": "reddit", "status": "not_implemented", "lastChecked": None, "error": None},
-            {"platform": "facebook", "status": "not_implemented", "lastChecked": None, "error": None},
-        ]
-    }
+                "detail": f"{missing} is not set.",
+            }
+        )
+
+    platforms.append(
+        {
+            "platform": "discord",
+            "status": "configured" if settings.discord_bot_token else "not_connected",
+            "lastChecked": None,
+            "error": None,
+            "detail": "Connector not built yet (phase 5).",
+        }
+    )
+
+    # Spec §46: never imply these are production-connected.
+    platforms.append(
+        {"platform": "reddit", "status": "not_implemented", "lastChecked": None,
+         "error": None, "detail": REDDIT_REASON}
+    )
+    platforms.append(
+        {"platform": "facebook", "status": "not_implemented", "lastChecked": None,
+         "error": None, "detail": FACEBOOK_REASON}
+    )
+
+    return {"platforms": platforms}
