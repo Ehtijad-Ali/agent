@@ -29,4 +29,6 @@ structlog==25.1.0
 
 # --- dev / test ---
 pytest==9.0.3
-pytest-asyncio==0.25.3
+# 0.25.x caps pytest at <9 and makes the whole file unresolvable. The 1.x line
+# is the one that supports pytest 9.
+pytest-asyncio==1.4.0
