@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but the template must be committed (backend spec §35). It holds key names
+# and comments only, never values.
+!.env.example
 
 # local sqlite dev database (recreate with `npm run db:push`)
 db/*.db
@@ -58,3 +61,10 @@ prompt
 server.log
 # Skills directory
 /skills/
+# python / backend
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/

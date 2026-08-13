@@ -1,0 +1,32 @@
+# Signal backend — Python 3.12+
+# Pinned to minor versions; bump deliberately, not incidentally.
+
+# --- web ---
+fastapi==0.121.2
+uvicorn[standard]==0.41.0
+pydantic==2.13.4
+pydantic-settings==2.7.1
+python-multipart==0.0.20
+
+# --- persistence ---
+sqlalchemy==2.0.44
+alembic==1.16.4
+psycopg[binary,pool]==3.2.10
+
+# --- cache / queue ---
+redis==5.2.1
+celery==5.4.0
+
+# --- auth ---
+pyjwt==2.10.1
+argon2-cffi==23.1.0
+
+# --- http / integrations ---
+httpx==0.28.1
+
+# --- observability ---
+structlog==25.1.0
+
+# --- dev / test ---
+pytest==9.0.3
+pytest-asyncio==0.25.3
