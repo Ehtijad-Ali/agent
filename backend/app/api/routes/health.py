@@ -12,6 +12,7 @@ from fastapi import APIRouter
 
 from app.core.config import get_settings
 from app.integrations.base import FACEBOOK_REASON, REDDIT_REASON
+from app.integrations.discord import DiscordConnector
 from app.integrations.telegram import TelegramConnector
 
 router = APIRouter(prefix="/health", tags=["health"])
@@ -94,15 +95,29 @@ async def health_platforms() -> dict:
             }
         )
 
-    platforms.append(
-        {
-            "platform": "discord",
-            "status": "configured" if settings.discord_bot_token else "not_connected",
-            "lastChecked": None,
-            "error": None,
-            "detail": "Connector not built yet (phase 5).",
-        }
-    )
+    if settings.discord_bot_token and settings.pseudonym_salt:
+        connector = DiscordConnector(settings.discord_bot_token, settings.pseudonym_salt)
+        status = await connector.health_check()
+        platforms.append(
+            {
+                "platform": "discord",
+                "status": status.status,
+                "lastChecked": status.last_checked.isoformat() if status.last_checked else None,
+                "error": status.error,
+                "detail": status.detail,
+            }
+        )
+    else:
+        missing = "DISCORD_BOT_TOKEN" if not settings.discord_bot_token else "PSEUDONYM_SALT"
+        platforms.append(
+            {
+                "platform": "discord",
+                "status": "not_connected",
+                "lastChecked": None,
+                "error": None,
+                "detail": f"{missing} is not set.",
+            }
+        )
 
     # Spec §46: never imply these are production-connected.
     platforms.append(
