@@ -188,3 +188,56 @@ class TestTimestamps:
         row = db.execute(select(Conversation)).scalars().one()
         assert row.posted_at.tzinfo is not None
         assert row.posted_at.hour == 12
+
+
+class TestAgents:
+    def _agent(self, db, **rules):
+        from app.models import Agent
+
+        agent = Agent(name="Test agent", agent_type="engagement", enabled=1,
+                      rules={"platforms": ["discord", "telegram"], **rules})
+        db.add(agent)
+        db.commit()
+        return agent
+
+    def test_enabled_agent_picks_up_new_conversation(self, db, config):
+        from app.services.ingestion_service import enabled_engagement_agents
+
+        self._agent(db)
+        counts: dict[str, int] = {}
+        persist_messages(db, "discord", [_message()], config,
+                         enabled_engagement_agents(db), counts)
+        assert counts == {"Test agent": 1}
+        row = db.execute(select(Conversation)).scalar_one()
+        assert any(h["action"] == "picked up by agent" for h in row.history)
+
+    def test_score_floor_excludes(self, db, config):
+        from app.services.ingestion_service import enabled_engagement_agents
+
+        self._agent(db, minScore=90)
+        counts: dict[str, int] = {}
+        persist_messages(db, "discord", [_message(message="hello everyone")], config,
+                         enabled_engagement_agents(db), counts)
+        assert counts == {"Test agent": 0}
+
+    def test_disabled_agent_is_ignored(self, db):
+        from app.services.ingestion_service import enabled_engagement_agents
+
+        agent = self._agent(db)
+        agent.enabled = 0
+        db.commit()
+        assert enabled_engagement_agents(db) == []
+
+
+class TestScanSummary:
+    def test_empty_telegram_poll_is_explained(self):
+        from app.services.ingestion_service import scan_summary
+
+        text = scan_summary(
+            [{"platform": "telegram", "examined": 0, "discovered": 0, "error": None,
+              "received": {"updates": 0, "textMessages": 0, "skippedNoText": 0,
+                           "chats": [], "events": []}}],
+            {},
+        )
+        assert "delivered nothing" in text
+        assert "no engagement agent is enabled" in text

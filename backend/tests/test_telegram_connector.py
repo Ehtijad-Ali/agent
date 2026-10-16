@@ -275,4 +275,56 @@ class TestHealthCheck:
             monkeypatch,
             {"username": "bot", "can_join_groups": True, "can_read_all_group_messages": True},
         )
-        assert status.detail == "Connected as @bot."
+        assert status.status == "connected"
+        assert status.detail.startswith("Connected as @bot.")
+        assert "/setjoingroups" not in status.detail
+        assert "re-added" in status.detail
+
+    def test_webhook_blocks_polling(self, connector, monkeypatch):
+        async def fake_call(method, **params):
+            if method == "getWebhookInfo":
+                return {"url": "https://example.com/hook"}
+            return {"username": "bot", "can_join_groups": True,
+                    "can_read_all_group_messages": True}
+
+        monkeypatch.setattr(connector, "_call", fake_call)
+        status = asyncio.run(connector.health_check())
+        assert status.status == "error"
+        assert "webhook" in status.error
+
+
+class TestPollReport:
+    def _poll(self, connector, monkeypatch, updates):
+        seen = {}
+
+        async def fake_call(method, **params):
+            seen.update(params)
+            return updates
+
+        monkeypatch.setattr(connector, "_call", fake_call)
+        msgs = asyncio.run(connector.fetch_messages())
+        return msgs, seen
+
+    def test_requests_membership_updates(self, connector, monkeypatch):
+        _, params = self._poll(connector, monkeypatch, [])
+        assert "my_chat_member" in params["allowed_updates"]
+        assert connector.last_poll["updates"] == 0
+
+    def test_records_bot_added_and_skipped_messages(self, connector, monkeypatch):
+        sticker = _message(text=None)
+        updates = [
+            {"update_id": 1, "my_chat_member": {
+                "chat": {"id": -1, "title": "Test Group"},
+                "old_chat_member": {"status": "left"},
+                "new_chat_member": {"status": "member"}}},
+            {"update_id": 2, "message": _message()},
+            {"update_id": 3, "message": sticker},
+        ]
+        msgs, _ = self._poll(connector, monkeypatch, updates)
+        assert len(msgs) == 1
+        poll = connector.last_poll
+        assert poll["updates"] == 3
+        assert poll["textMessages"] == 1
+        assert poll["skippedNoText"] == 1
+        assert poll["chats"] == ["@freegameschat"]
+        assert poll["events"] == [{"action": "bot added to group", "chat": "Test Group"}]

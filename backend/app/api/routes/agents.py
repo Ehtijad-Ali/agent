@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models import ActivityEntry, Agent, AgentOutput
+from app.models import ActivityEntry, Agent, AgentOutput, ScanRun
 from app.schemas.agent import (
     AgentCreate,
     AgentOut,
@@ -59,6 +59,26 @@ def _get_or_404(db: Session, agent_id: str) -> Agent:
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No agent with id {agent_id}."
         )
     return agent
+
+
+def _scan_now(db: Session, background: BackgroundTasks, agent: Agent) -> None:
+    """Run a scan as soon as an engagement agent is switched on.
+
+    Scheduled scans run twice a day, so without this a freshly enabled agent
+    does nothing visible for up to twelve hours -- which reads as broken.
+    """
+    if agent.agent_type != "engagement" or not agent.enabled:
+        return
+    from app.api.routes.scans import _execute
+    from app.services.ingestion_service import build_connectors
+
+    if not build_connectors():
+        return
+
+    scan = ScanRun(status="running", trigger="manual")
+    db.add(scan)
+    db.commit()
+    background.add_task(_execute, scan.id)
 
 
 def _out(agent: Agent) -> AgentOut:
@@ -116,7 +136,9 @@ def list_types() -> dict:
 
 
 @router.post("", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
-def create_agent(request: AgentCreate, db: Session = Depends(get_db)) -> AgentOut:
+def create_agent(
+    request: AgentCreate, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> AgentOut:
     # No explicit type check: AgentType is a Literal over AGENT_TYPES, so an
     # unknown type is rejected as a 422 during request validation before this
     # body runs. A second check here would be unreachable.
@@ -133,7 +155,8 @@ def create_agent(request: AgentCreate, db: Session = Depends(get_db)) -> AgentOu
             actor=ACTOR,
             action="created agent",
             item=agent.name,
-            after=agent.agent_type,
+            after=agent.agent_type
+            + ("" if agent.enabled else " (disabled -- enable it to start)"),
         )
     )
     try:
@@ -146,6 +169,7 @@ def create_agent(request: AgentCreate, db: Session = Depends(get_db)) -> AgentOu
         ) from exc
 
     db.refresh(agent)
+    _scan_now(db, background, agent)
     return _out(agent)
 
 
@@ -156,7 +180,10 @@ def get_agent(agent_id: str, db: Session = Depends(get_db)) -> AgentOut:
 
 @router.patch("/{agent_id}", response_model=AgentOut)
 def update_agent(
-    agent_id: str, request: AgentUpdate, db: Session = Depends(get_db)
+    agent_id: str,
+    request: AgentUpdate,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
 ) -> AgentOut:
     agent = _get_or_404(db, agent_id)
     before = "enabled" if agent.enabled else "disabled"
@@ -189,6 +216,8 @@ def update_agent(
         ) from exc
 
     db.refresh(agent)
+    if before == "disabled":
+        _scan_now(db, background, agent)
     return _out(agent)
 
 

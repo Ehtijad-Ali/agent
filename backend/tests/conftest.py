@@ -22,6 +22,10 @@ import os
 os.environ["DATABASE_URL"] = ""
 # The scanner must never start during tests; it would poll live platforms.
 os.environ["SCAN_INTERVAL_SECONDS"] = "0"
+# Nor may anything else reach a live platform -- enabling an agent triggers a
+# scan, which with the developer's real tokens would poll real groups.
+os.environ["TELEGRAM_BOT_TOKEN"] = ""
+os.environ["DISCORD_BOT_TOKEN"] = ""
 # A fixed salt keeps pseudonyms and visitor hashes deterministic across runs.
 os.environ.setdefault("PSEUDONYM_SALT", "test-salt-not-a-real-one")
 os.environ["ENVIRONMENT"] = "development"

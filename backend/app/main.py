@@ -41,6 +41,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("signal")
+# httpx logs every request URL at INFO, and a Telegram Bot API URL embeds the
+# bot token. Left at INFO, the token ends up in plain text in every log file.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 settings = get_settings()
 

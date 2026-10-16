@@ -24,7 +24,7 @@ from app.core.config import get_settings
 from app.integrations.base import NormalisedMessage, PlatformConnector
 from app.integrations.discord import DiscordConnector, DiscordError
 from app.integrations.telegram import TelegramConnector, TelegramError
-from app.models import ActivityEntry, Conversation, ScanRun
+from app.models import ActivityEntry, Agent, Conversation, ScanRun
 from app.schemas.tuning import TuningConfig
 from app.services.reply_service import detect_language, draft_all_variants
 from app.services.scoring_service import ScoreResult, score_message
@@ -180,11 +180,60 @@ def _existing_external_ids(db: Session, platform: str, ids: list[str]) -> set[st
     return set(rows)
 
 
+def enabled_engagement_agents(db: Session) -> list[Agent]:
+    return list(
+        db.execute(
+            select(Agent).where(Agent.agent_type == "engagement", Agent.enabled == 1)
+        ).scalars()
+    )
+
+
+def agent_accepts(agent: Agent, conv: Conversation) -> bool:
+    """Whether a conversation falls inside an engagement agent's rules."""
+    rules = agent.rules or {}
+    if conv.platform not in rules.get("platforms", ["discord", "telegram"]):
+        return False
+    if conv.score < int(rules.get("minScore", 0)):
+        return False
+    if conv.risk_flags and rules.get("skipRiskFlagged", True):
+        return False
+    return True
+
+
+def assign_agents(
+    conversations: list[Conversation], agents: list[Agent]
+) -> dict[str, int]:
+    """Record on each new conversation which agents picked it up.
+
+    Returns the count per agent name so the scan can report it. An agent that
+    matched nothing still appears with 0 -- "ran and found nothing" and "never
+    ran" must not look the same.
+    """
+    counts = {a.name: 0 for a in agents}
+    now = datetime.now(UTC).isoformat()
+    for conv in conversations:
+        picked = [a for a in agents if agent_accepts(a, conv)]
+        if not picked:
+            continue
+        conv.history = [
+            *conv.history,
+            *(
+                {"at": now, "actor": a.name, "action": "picked up by agent"}
+                for a in picked
+            ),
+        ]
+        for a in picked:
+            counts[a.name] += 1
+    return counts
+
+
 def persist_messages(
     db: Session,
     platform: str,
     messages: list[NormalisedMessage],
     config: TuningConfig,
+    agents: list[Agent] | None = None,
+    agent_counts: dict[str, int] | None = None,
 ) -> int:
     """Insert only messages not already stored. Returns the number added."""
     if not messages:
@@ -197,7 +246,9 @@ def persist_messages(
         if msg.external_id in seen:
             continue
         seen.add(msg.external_id)
-        db.add(normalise_to_conversation(msg, config))
+        conv = normalise_to_conversation(msg, config)
+        picked = assign_agents([conv], agents) if agents else {}
+        db.add(conv)
         try:
             # Flush per row: one row violating a constraint must not discard
             # the whole batch.
@@ -207,6 +258,9 @@ def persist_messages(
             logger.info("Skipping duplicate %s:%s", platform, msg.external_id)
             continue
         added += 1
+        if agent_counts is not None:
+            for name, n in picked.items():
+                agent_counts[name] = agent_counts.get(name, 0) + n
 
     db.commit()
     return added
@@ -221,6 +275,8 @@ async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
     """
     config = active_config()
     connectors = build_connectors()
+    agents = enabled_engagement_agents(db)
+    agent_counts: dict[str, int] = {a.name: 0 for a in agents}
     outcomes: list[dict] = []
     total_examined = 0
     total_added = 0
@@ -232,6 +288,9 @@ async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
             "TELEGRAM_BOT_TOKEN and PSEUDONYM_SALT in backend/.env."
         )
         scan.finished_at = datetime.now(UTC)
+        db.add(
+            ActivityEntry(actor="system", action="scan failed", after=scan.error)
+        )
         db.commit()
         return scan
 
@@ -256,17 +315,25 @@ async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
             )
             continue
 
-        added = persist_messages(db, name, messages, config)
+        added = persist_messages(db, name, messages, config, agents, agent_counts)
         total_examined += len(messages)
         total_added += added
-        outcomes.append(
-            {
-                "platform": name,
-                "examined": len(messages),
-                "discovered": added,
-                "error": None,
-            }
-        )
+        outcome = {
+            "platform": name,
+            "examined": len(messages),
+            "discovered": added,
+            "error": None,
+        }
+        poll = getattr(connector, "last_poll", None)
+        if poll:
+            outcome["received"] = poll
+            for event in poll.get("events", []):
+                db.add(
+                    ActivityEntry(
+                        actor=name, action=event["action"], item=event["chat"]
+                    )
+                )
+        outcomes.append(outcome)
 
     scan.status = "completed"
     scan.examined = total_examined
@@ -274,14 +341,54 @@ async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
     scan.platforms = outcomes
     scan.finished_at = datetime.now(UTC)
 
-    if total_added:
+    # Every scan is recorded, including the ones that found nothing. A test
+    # message that "did nothing" has to leave a trace saying what the scan
+    # actually received, or there is no way to tell where it was lost.
+    db.add(
+        ActivityEntry(
+            actor="system",
+            action="scan completed",
+            item=f"{total_added} new conversation(s)",
+            after=scan_summary(outcomes, agent_counts),
+        )
+    )
+    for agent_name, count in agent_counts.items():
         db.add(
             ActivityEntry(
-                actor="system",
-                action="scan completed",
-                item=f"{total_added} new conversation(s)",
-                after=f"examined {total_examined}",
+                actor=agent_name[:64],
+                action="agent run",
+                item=f"{count} new conversation(s) picked up",
             )
         )
     db.commit()
     return scan
+
+
+def scan_summary(outcomes: list[dict], agent_counts: dict[str, int]) -> str:
+    """One line per scan that explains an empty result rather than hiding it."""
+    parts: list[str] = []
+    for o in outcomes:
+        if o.get("error"):
+            parts.append(f"{o['platform']}: ERROR {o['error']}")
+            continue
+        poll = o.get("received")
+        if poll is None:
+            parts.append(f"{o['platform']}: {o['examined']} message(s)")
+            continue
+        text = (
+            f"{o['platform']}: {poll['updates']} update(s), "
+            f"{poll['textMessages']} text message(s)"
+        )
+        if poll["skippedNoText"]:
+            text += f", {poll['skippedNoText']} without text skipped"
+        if poll["chats"]:
+            text += f" from {', '.join(poll['chats'])}"
+        if not poll["updates"]:
+            text += (
+                " -- Telegram delivered nothing since the last scan. If the bot "
+                "is in a group, remove and re-add it so privacy-mode changes apply"
+            )
+        parts.append(text)
+    if not agent_counts:
+        parts.append("no engagement agent is enabled")
+    return "; ".join(parts)
