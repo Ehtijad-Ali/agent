@@ -6,11 +6,19 @@ network calls are made.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC
 
+import httpx
 import pytest
 
-from app.integrations.telegram import TelegramConnector
+from app.integrations import telegram as telegram_module
+from app.integrations.telegram import (
+    MAX_ATTEMPTS,
+    TelegramConnector,
+    TelegramError,
+    _retry_after,
+)
 from app.utils.hashing import content_hash, pseudonymise
 
 SALT = "test-salt-not-a-real-one"
@@ -131,3 +139,140 @@ class TestWebhookSecret:
 def test_requires_a_token():
     with pytest.raises(ValueError, match="TELEGRAM_BOT_TOKEN"):
         TelegramConnector(bot_token="", pseudonym_salt=SALT)
+
+
+class TestErrorMapping:
+    """Status codes must map to messages that name the actual fix."""
+
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            (401, "unauthorised"),
+            (429, "rate limited"),
+        ],
+    )
+    def test_messages_are_actionable(self, status, expected):
+        response = httpx.Response(status, headers={"Retry-After": "5"})
+        with pytest.raises(TelegramError, match=expected):
+            TelegramConnector._handle(response, "getMe")
+
+    def test_ok_false_surfaces_the_description(self):
+        response = httpx.Response(
+            200, json={"ok": False, "description": "chat not found", "error_code": 400}
+        )
+        with pytest.raises(TelegramError, match="chat not found"):
+            TelegramConnector._handle(response, "sendMessage")
+
+
+class TestRetryAfter:
+    """Telegram reports the flood-wait delay in two different places."""
+
+    def test_reads_the_header(self):
+        assert _retry_after(httpx.Response(429, headers={"Retry-After": "7"})) == 7.0
+
+    def test_falls_back_to_the_json_body(self):
+        """Unlike Discord, Telegram often sends the delay only in the body."""
+        response = httpx.Response(429, json={"ok": False, "parameters": {"retry_after": 12}})
+        assert _retry_after(response) == 12.0
+
+    def test_caps_absurd_values(self):
+        # A bad header must not park ingestion for an hour.
+        assert _retry_after(httpx.Response(429, headers={"Retry-After": "3600"})) == 30.0
+
+    def test_defaults_when_unparseable(self):
+        assert _retry_after(httpx.Response(429, headers={"Retry-After": "soon"})) == 1.0
+
+    def test_defaults_on_an_empty_body(self):
+        assert _retry_after(httpx.Response(429)) == 1.0
+
+
+class TestRateLimitRetry:
+    """A 429 is waited out and retried rather than raised on first sight.
+
+    Without this the connector fell over on its own second request: Telegram's
+    per-chat flood limits trip routinely when a scan walks several chats in a
+    row, and one 429 abandoned the remainder of the cycle.
+    """
+
+    @staticmethod
+    def _patch(monkeypatch, responses):
+        calls: list[str] = []
+        slept: list[float] = []
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def post(self, url, json=None):
+                calls.append(url)
+                return responses[min(len(calls) - 1, len(responses) - 1)]
+
+        async def _fake_sleep(seconds):
+            slept.append(seconds)
+
+        monkeypatch.setattr(telegram_module.httpx, "AsyncClient", _FakeClient)
+        monkeypatch.setattr(telegram_module.asyncio, "sleep", _fake_sleep)
+        return calls, slept
+
+    def test_retries_then_succeeds(self, connector, monkeypatch):
+        calls, slept = self._patch(
+            monkeypatch,
+            [
+                httpx.Response(429, headers={"Retry-After": "2"}),
+                httpx.Response(200, json={"ok": True, "result": {"username": "bot"}}),
+            ],
+        )
+        assert asyncio.run(connector._call("getMe")) == {"username": "bot"}
+        assert len(calls) == 2, "the 429 should have been retried"
+        assert slept == [2.0], "it should wait exactly as long as Telegram asked"
+
+    def test_gives_up_after_max_attempts(self, connector, monkeypatch):
+        calls, slept = self._patch(
+            monkeypatch, [httpx.Response(429, headers={"Retry-After": "1"})]
+        )
+        # Specifically the exhaustion message, not the per-call "retry after Ns"
+        # one -- after three refusals the caller needs to know it gave up.
+        with pytest.raises(TelegramError, match="still rate limited after 3 attempts"):
+            asyncio.run(connector._call("getMe"))
+        assert len(calls) == MAX_ATTEMPTS
+        assert len(slept) == MAX_ATTEMPTS - 1, "no sleep after the final attempt"
+
+    def test_does_not_retry_other_errors(self, connector, monkeypatch):
+        """Only 429 is transient. A 401 must fail immediately."""
+        calls, slept = self._patch(monkeypatch, [httpx.Response(401)])
+        with pytest.raises(TelegramError, match="unauthorised"):
+            asyncio.run(connector._call("getMe"))
+        assert len(calls) == 1
+        assert slept == []
+
+
+class TestHealthCheck:
+    def _run(self, connector, monkeypatch, me):
+        async def fake_call(method, **params):
+            return me
+
+        monkeypatch.setattr(connector, "_call", fake_call)
+        return asyncio.run(connector.health_check())
+
+    def test_flags_group_joining_disabled(self, connector, monkeypatch):
+        status = self._run(
+            connector,
+            monkeypatch,
+            {"username": "bot", "can_join_groups": False, "can_read_all_group_messages": True},
+        )
+        assert status.status == "connected"
+        assert "/setjoingroups" in status.detail
+
+    def test_clean_when_fully_configured(self, connector, monkeypatch):
+        status = self._run(
+            connector,
+            monkeypatch,
+            {"username": "bot", "can_join_groups": True, "can_read_all_group_messages": True},
+        )
+        assert status.detail == "Connected as @bot."

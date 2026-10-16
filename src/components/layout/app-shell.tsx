@@ -16,6 +16,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Menu,
+  Bot,
+  Users,
 } from "lucide-react";
 import { TopBar } from "./top-bar";
 import { CommandPalette } from "./command-palette";
@@ -28,7 +30,9 @@ const ICONS: Record<ViewId, React.ComponentType<{ className?: string }>> = {
   playground: FlaskConical,
   tuning: SlidersHorizontal,
   safety: ShieldCheck,
+  agents: Bot,
   activity: History,
+  users: Users,
 };
 
 /**

@@ -16,6 +16,17 @@ import {
   PanelRightOpen,
 } from "lucide-react";
 import { useSignalStore } from "@/stores/signal-store";
+import * as api from "@/lib/api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { EmptyState } from "@/components/signal/primitives";
 import { InspectorAnalysis } from "./inspector-analysis";
 import { InspectorReply } from "./inspector-reply";
@@ -191,8 +202,73 @@ function FooterActions({
 }) {
   const { toast } = useToast();
   const updateConversation = useSignalStore((s) => s.updateConversation);
+  const sendReply = useSignalStore((s) => s.sendReply);
+  const [sending, setSending] = React.useState(false);
+  const [sendOpen, setSendOpen] = React.useState(false);
+  const [preview, setPreview] = React.useState<api.ReplyPreview | null>(null);
 
-  const act = (status: Status, label: string) => {
+  // Sending requires "approved" -- the server enforces this too, and refuses
+  // regardless of what this component believes.
+  const isApproved = conversation.status === "approved";
+  const alreadySent = conversation.status === "sent";
+
+  // Never leave a dialog armed against a conversation the operator has moved
+  // away from.
+  React.useEffect(() => {
+    setSendOpen(false);
+    setPreview(null);
+  }, [conversation.id]);
+
+  /** Ask the server what would be posted, and why it might be refused. */
+  const openSendDialog = async () => {
+    setPreview(null);
+    setSendOpen(true);
+    try {
+      setPreview(await api.previewReply(conversation.id));
+    } catch (cause) {
+      setPreview({
+        text: "",
+        canSend: false,
+        problems: [
+          cause instanceof Error ? cause.message : "Could not reach the backend.",
+        ],
+      });
+    }
+  };
+
+  const confirmSend = async () => {
+    setSending(true);
+    const result = await sendReply(conversation.id);
+    setSending(false);
+    setSendOpen(false);
+
+    if (typeof result === "string") {
+      // The safety check refused, or the platform did. Either way nothing was
+      // posted, and the reason matters more than the failure.
+      toast({
+        title: "Reply not sent",
+        description: result,
+        variant: "destructive",
+        duration: 12000,
+      });
+      return;
+    }
+    toast({
+      title: "Reply posted",
+      description: `Sent to ${conversation.community}. This cannot be undone.`,
+      duration: 8000,
+    });
+  };
+
+  /**
+   * Apply a triage decision.
+   *
+   * ``advance`` moves the selection on to the next queued conversation, which
+   * is what you want for reject/snooze. Approve deliberately stays put: it is
+   * the prerequisite for sending, so jumping away would carry the Send button
+   * off screen before it could be used.
+   */
+  const act = (status: Status, label: string, advance = true) => {
     const prev = conversation;
     const updated: Conversation = {
       ...prev,
@@ -223,7 +299,7 @@ function FooterActions({
         </ToastAction>
       ),
     });
-    onAfterAction();
+    if (advance) onAfterAction();
   };
 
   return (
@@ -235,27 +311,33 @@ function FooterActions({
     >
       <Button
         size="sm"
-        onClick={() => act("approved", "Approved")}
-        className="bg-success text-white hover:bg-success/90"
+        onClick={() => act("approved", "Approved", false)}
+        disabled={isApproved || alreadySent}
+        className="bg-success text-white hover:bg-success/90 disabled:opacity-100 disabled:bg-success/70"
+        aria-pressed={isApproved}
       >
         <Check className="h-3.5 w-3.5" />
-        Approve
+        {isApproved ? "Approved" : "Approve"}
       </Button>
       <Button
         variant="outline"
         size="sm"
         onClick={() => act("rejected", "Rejected")}
+        disabled={conversation.status === "rejected" || alreadySent}
+        aria-pressed={conversation.status === "rejected"}
       >
         <X className="h-3.5 w-3.5" />
-        Reject
+        {conversation.status === "rejected" ? "Rejected" : "Reject"}
       </Button>
       <Button
         variant="ghost"
         size="sm"
         onClick={() => act("snoozed", "Snoozed 24h")}
+        disabled={conversation.status === "snoozed" || alreadySent}
+        aria-pressed={conversation.status === "snoozed"}
       >
         <Clock className="h-3.5 w-3.5" />
-        Snooze 24h
+        {conversation.status === "snoozed" ? "Snoozed" : "Snooze 24h"}
       </Button>
       <div className="flex-1" />
       <Button variant="ghost" size="sm" onClick={onEdit}>
@@ -266,10 +348,87 @@ function FooterActions({
         variant="ghost"
         size="sm"
         onClick={() => act("manually_posted", "Marked manually posted")}
+        disabled={conversation.status === "manually_posted" || alreadySent}
+        aria-pressed={conversation.status === "manually_posted"}
+      >
+        <Pencil className="h-3.5 w-3.5" />
+        {conversation.status === "manually_posted" ? "Posted" : "Mark posted"}
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={openSendDialog}
+        disabled={!isApproved || sending}
+        title={
+          alreadySent
+            ? "Already replied. One reply per person, ever."
+            : isApproved
+              ? "Post this reply to the platform"
+              : "Approve the conversation first"
+        }
+        aria-label="Send reply to the platform"
       >
         <Send className="h-3.5 w-3.5" />
-        Mark posted
+        {alreadySent ? "Replied" : sending ? "Sending…" : "Send reply"}
       </Button>
+
+      <AlertDialog open={sendOpen} onOpenChange={setSendOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Post this reply to {conversation.platform}?
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>
+                  It will appear publicly in{" "}
+                  <span className="font-medium text-text">
+                    {conversation.community}
+                  </span>{" "}
+                  as a reply to {conversation.authorPseudonym}. This cannot be
+                  undone, and no further reply to this person will ever be
+                  allowed.
+                </p>
+
+                {preview === null ? (
+                  <p className="text-text-muted">Checking…</p>
+                ) : (
+                  <>
+                    <div className="rounded-md border bg-surface-sunk p-2.5 text-sm text-text whitespace-pre-wrap">
+                      {preview.text || "(nothing to send)"}
+                    </div>
+                    {preview.problems.length > 0 && (
+                      <div className="rounded-md border border-destructive/40 p-2.5">
+                        <p className="font-medium text-destructive">
+                          Blocked by the safety check:
+                        </p>
+                        <ul className="mt-1 list-disc pl-4 space-y-0.5">
+                          {preview.problems.map((problem) => (
+                            <li key={problem}>{problem}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={sending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                // Keep the dialog open on refusal so the reasons stay readable.
+                event.preventDefault();
+                void confirmSend();
+              }}
+              disabled={sending || !preview?.canSend}
+            >
+              {sending ? "Sending…" : "Post reply"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.div>
   );
 }

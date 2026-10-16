@@ -17,7 +17,7 @@ import { CompareToQueue } from "./compare-to-queue";
 import { confidenceExplanation } from "@/lib/scoring";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import type { AnalyseResult } from "@/lib/mockApi";
+import type { AnalyseResult } from "@/lib/api";
 import type { Conversation, Intent, RiskFlag } from "@/lib/types";
 
 const LANGUAGE_NAMES: Record<string, string> = {

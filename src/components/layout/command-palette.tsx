@@ -24,6 +24,8 @@ import {
   Moon,
   Sun,
   Play,
+  Bot,
+  Users,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useToast } from "@/hooks/use-toast";
@@ -35,7 +37,9 @@ const ICONS = {
   playground: FlaskConical,
   tuning: SlidersHorizontal,
   safety: ShieldCheck,
+  agents: Bot,
   activity: History,
+  users: Users,
 } as const;
 
 /**
@@ -79,11 +83,27 @@ export function CommandPalette() {
     setOpen(false);
   }
 
-  function runScan() {
+  async function runScan() {
     setOpen(false);
+    toast({ title: "Scan started", description: "Polling connected platforms." });
+
+    const result = await useSignalStore.getState().runScan();
+    if (!result || result.error) {
+      toast({
+        title: "Scan failed",
+        description:
+          result?.error ??
+          useSignalStore.getState().error ??
+          "The backend did not respond.",
+        variant: "destructive",
+      });
+      return;
+    }
     toast({
-      title: "Scan started",
-      description: "Listening across Discord, Telegram, Facebook, and Reddit.",
+      title: result.discovered
+        ? `Found ${result.discovered} new conversation${result.discovered === 1 ? "" : "s"}`
+        : "No new conversations",
+      description: `Examined ${result.examined} message${result.examined === 1 ? "" : "s"}.`,
     });
   }
 

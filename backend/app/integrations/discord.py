@@ -72,7 +72,7 @@ class DiscordConnector(PlatformConnector):
             "Authorization": f"Bot {self._token}",
             # Discord asks bots to identify themselves; unlabelled traffic is
             # more likely to be rate limited.
-            "User-Agent": "SignalBot (https://joinallbettors.example, 0.1)",
+            "User-Agent": "SignalBot (https://www.all-bettors.com, 0.1)",
         }
 
     async def _request(
@@ -110,9 +110,15 @@ class DiscordConnector(PlatformConnector):
                 logger.info("%s rate limited, waiting %.2fs", label, delay)
                 await asyncio.sleep(delay)
                 continue
+            if response.status_code == 429:
+                # Out of attempts: say so, rather than repeating the per-call
+                # "retry after Ns" message as if this were the first refusal.
+                raise DiscordError(
+                    f"{label}: still rate limited after {attempts} attempts"
+                )
             return self._handle(response, label)
 
-        raise DiscordError(f"{label}: still rate limited after {attempts} attempts")
+        raise DiscordError(f"{label}: retry loop exited without a response")
 
     async def _get(self, path: str, **params: Any) -> Any:
         return await self._request("GET", path, params=params)
@@ -250,7 +256,11 @@ class DiscordConnector(PlatformConnector):
                 try:
                     collected.extend(
                         await self.fetch_channel(
-                            channel["id"], source["guild"], channel["name"], limit
+                            channel["id"],
+                            source["guild"],
+                            channel["name"],
+                            limit,
+                            guild_id=source.get("guildId"),
                         )
                     )
                 except DiscordError as exc:
@@ -258,7 +268,12 @@ class DiscordConnector(PlatformConnector):
         return collected
 
     async def fetch_channel(
-        self, channel_id: str, guild_name: str, channel_name: str, limit: int = 50
+        self,
+        channel_id: str,
+        guild_name: str,
+        channel_name: str,
+        limit: int = 50,
+        guild_id: str | None = None,
     ) -> list[NormalisedMessage]:
         params: dict[str, Any] = {"limit": min(limit, 100)}
         after = self._last_seen.get(channel_id)
@@ -272,7 +287,7 @@ class DiscordConnector(PlatformConnector):
 
         out: list[NormalisedMessage] = []
         for raw in raw_messages:
-            normalised = self.normalise_message(raw, guild_name, channel_name)
+            normalised = self.normalise_message(raw, guild_name, channel_name, guild_id)
             if normalised is not None:
                 out.append(normalised)
         return out
@@ -288,7 +303,11 @@ class DiscordConnector(PlatformConnector):
     # -- normalisation (spec §10) -----------------------------------------
 
     def normalise_message(
-        self, raw: dict[str, Any], guild_name: str, channel_name: str
+        self,
+        raw: dict[str, Any],
+        guild_name: str,
+        channel_name: str,
+        guild_id: str | None = None,
     ) -> NormalisedMessage | None:
         """Convert a Discord message into the shared shape.
 
@@ -306,7 +325,9 @@ class DiscordConnector(PlatformConnector):
 
         message_id = raw.get("id")
         channel_id = raw.get("channel_id")
-        guild_id = raw.get("guild_id")
+        # GET /channels/{id}/messages omits guild_id, so the caller supplies it
+        # from list_sources -- without it every message loses its permalink.
+        guild_id = raw.get("guild_id") or guild_id
 
         source_url = None
         if guild_id and channel_id and message_id:

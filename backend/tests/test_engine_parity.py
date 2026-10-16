@@ -20,15 +20,41 @@ frontend; do not hand-edit the fixture.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from app.core.defaults import default_tuning
+from app.services import scoring_service as scoring_module
 from app.services.scoring_service import score_message
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ts_engine_scores.json"
+
+# The instant the golden fixture was captured from the TypeScript engine.
+#
+# Every ``postedAt`` in the file is this time minus a whole number of hours, and
+# the newest row sits exactly on it. Scoring reads the wall clock to award the
+# "Posted within 24h" bonus (scoring_service: ``datetime.now(UTC) - posted_at``),
+# so the three rows inside that window at capture quietly lost 4 points once the
+# fixture aged past a day. That is what broke this suite 54 days after capture --
+# the engine was right, the test was simply not deterministic.
+#
+# Pinning the clock here is what makes the comparison meaningful: the fixture is
+# a recording of one moment, so it has to be replayed at that moment.
+CAPTURED_AT = datetime(2026, 8, 13, 17, 21, 46, 93_000, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _freeze_clock(monkeypatch):
+    """Replay the corpus at its capture instant rather than at test time."""
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return CAPTURED_AT if tz is not None else CAPTURED_AT.replace(tzinfo=None)
+
+    monkeypatch.setattr(scoring_module, "datetime", _FrozenDatetime)
 
 
 def _load():

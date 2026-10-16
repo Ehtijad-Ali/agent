@@ -13,6 +13,7 @@ Two things about Telegram bots decide what this can and cannot do:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -25,6 +26,30 @@ from app.utils.hashing import pseudonymise
 logger = logging.getLogger(__name__)
 
 API_ROOT = "https://api.telegram.org"
+
+# How many times a 429 is waited out before giving up.
+MAX_ATTEMPTS = 3
+
+
+def _retry_after(response: httpx.Response) -> float:
+    """Seconds to wait from a 429.
+
+    Telegram reports the delay in ``parameters.retry_after`` in the JSON body,
+    and usually -- but not always -- in a Retry-After header, so both are
+    consulted. Its flood waits run longer than Discord's sub-second bucket
+    limits, hence the 30s ceiling rather than 10; it is still capped, because a
+    malformed value must not park ingestion indefinitely.
+    """
+    raw: Any = response.headers.get("Retry-After")
+    if raw is None:
+        try:
+            raw = (response.json().get("parameters") or {}).get("retry_after")
+        except ValueError:
+            raw = None
+    try:
+        return max(0.0, min(float(raw), 30.0))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 class TelegramError(RuntimeError):
@@ -51,13 +76,38 @@ class TelegramConnector(PlatformConnector):
         return f"{API_ROOT}/bot{self._token}"
 
     async def _call(self, method: str, **params: Any) -> Any:
-        """One Bot API call. Never logs the token or the full URL."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            try:
-                response = await client.post(f"{self._base}/{method}", json=params)
-            except httpx.HTTPError as exc:
-                raise TelegramError(f"{method}: transport error: {exc}") from exc
+        """One Bot API call. Never logs the token or the full URL.
 
+        A 429 is waited out and retried rather than raised. Telegram enforces
+        per-chat and per-second flood limits, so a scan that touches several
+        chats in succession hits them routinely; failing on the first one would
+        abandon the rest of the cycle.
+        """
+        for attempt in range(MAX_ATTEMPTS):
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                try:
+                    response = await client.post(f"{self._base}/{method}", json=params)
+                except httpx.HTTPError as exc:
+                    raise TelegramError(f"{method}: transport error: {exc}") from exc
+
+            if response.status_code == 429 and attempt < MAX_ATTEMPTS - 1:
+                delay = _retry_after(response)
+                logger.info("%s rate limited, waiting %.2fs", method, delay)
+                await asyncio.sleep(delay)
+                continue
+            if response.status_code == 429:
+                # Out of attempts: say so, rather than repeating the per-call
+                # "retry after Ns" message as if this were the first refusal.
+                raise TelegramError(
+                    f"{method}: still rate limited after {MAX_ATTEMPTS} attempts"
+                )
+            return self._handle(response, method)
+
+        raise TelegramError(f"{method}: retry loop exited without a response")
+
+    @staticmethod
+    def _handle(response: httpx.Response, method: str) -> Any:
+        """Turn one response into a result or a TelegramError."""
         if response.status_code == 401:
             raise TelegramError(
                 f"{method}: unauthorised. The bot token is wrong or was revoked."
@@ -95,6 +145,15 @@ class TelegramConnector(PlatformConnector):
         # configured bot still sees nothing.
         can_read_all = me.get("can_read_all_group_messages", False)
         detail = f"Connected as @{username}."
+        # can_join_groups is BotFather's "Allow Groups?" setting. When it is
+        # off, Telegram hides the bot from the add-member picker entirely, so
+        # it can be found by search but never added to a group.
+        if not me.get("can_join_groups", True):
+            detail += (
+                " Group joining is OFF, so this bot cannot be added to any "
+                "group. Enable it in BotFather: /setjoingroups -> select the "
+                "bot -> Enable."
+            )
         if not can_read_all:
             detail += (
                 " Privacy mode is ON, so this bot only receives messages that "

@@ -11,6 +11,8 @@ import {
   SlidersHorizontal,
   ShieldCheck,
   History,
+  Bot,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -21,7 +23,9 @@ const ICONS = {
   playground: FlaskConical,
   tuning: SlidersHorizontal,
   safety: ShieldCheck,
+  agents: Bot,
   activity: History,
+  users: Users,
 } as const;
 
 /**

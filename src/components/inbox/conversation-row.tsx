@@ -44,11 +44,14 @@ export function ConversationRow({
     c.status === "approved" ||
     c.status === "rejected" ||
     c.status === "blocked" ||
-    c.status === "manually_posted";
+    c.status === "manually_posted" ||
+    c.status === "sent";
   const isSnoozed = c.status === "snoozed";
 
   const decisionIcon =
-    c.status === "approved" || c.status === "manually_posted" ? (
+    c.status === "approved" ||
+    c.status === "manually_posted" ||
+    c.status === "sent" ? (
       <Check className="h-3.5 w-3.5 text-success" aria-label="Approved" />
     ) : c.status === "rejected" || c.status === "blocked" ? (
       <X className="h-3.5 w-3.5 text-risk" aria-label="Rejected" />

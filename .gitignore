@@ -65,6 +65,16 @@ server.log
 __pycache__/
 *.py[cod]
 .venv/
+.venv.broken/
 venv/
 .pytest_cache/
 .ruff_cache/
+
+# backend sqlite dev database (recreated on boot; WAL sidecars included)
+backend/*.db
+backend/*.db-wal
+backend/*.db-shm
+
+# local deploy helper artefacts
+install-server-key.log
+plink.exe
