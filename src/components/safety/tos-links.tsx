@@ -23,6 +23,7 @@ const PLATFORM_ORDER: Platform[] = [
   "telegram",
   "facebook",
   "reddit",
+  "youtube",
 ];
 
 export function TosLinks() {

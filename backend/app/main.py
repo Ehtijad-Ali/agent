@@ -1,7 +1,9 @@
 """Signal backend entrypoint.
 
-Phase 1. Serves the scoring-engine endpoints, which need no database. The
-conversation, auth and reply routes arrive with Phase 2.
+Phase 2. Serves the scoring engine plus the conversation, activity, insights,
+scan and outbound-reply routes, backed by a database and a background ingestion
+poller. Auth remains unbuilt, so writes are attributed to a single local
+operator.
 """
 
 from __future__ import annotations
@@ -9,14 +11,32 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routes import engine, health
+from app.api.routes import (
+    activity,
+    agents,
+    assistant,
+    auth,
+    conversations,
+    engine,
+    health,
+    insights,
+    platforms,
+    replies,
+    scans,
+    search,
+    tracking,
+    users,
+)
+from app.api.routes.auth import current_user
 from app.core.config import get_settings
+from app.db.session import init_db
+from app.workers import poller
 
 logging.basicConfig(
     level=get_settings().log_level,
@@ -30,8 +50,9 @@ app = FastAPI(
     title="Signal API",
     version="0.1.0",
     description=(
-        "Backend for Signal, a social intent radar. Phase 1: scoring engine "
-        "endpoints. Conversations, auth and replies follow in Phase 2."
+        "Backend for Signal, a social intent radar. Phase 2: scoring engine, "
+        "conversations, insights, ingestion and human-approved replies. Auth "
+        "follows in Phase 3."
     ),
     docs_url="/docs",
     redoc_url="/redoc",
@@ -49,14 +70,36 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _validate_configuration() -> None:
+    from app.utils.background import capture_loop
+
+    capture_loop()
     problems = settings.validate_for_production()
     if problems:
         raise RuntimeError("Invalid production configuration: " + "; ".join(problems))
     if not settings.has_database:
         logger.warning(
             "DATABASE_URL is unset - engine endpoints only. "
-            "Conversation, auth and reply routes are unavailable."
+            "Conversation and activity routes will return 503."
         )
+        return
+
+    init_db()
+    engine.load_active_config()
+    # Work that was in flight when the process last stopped cannot resume
+    # mid-call; mark it so the UI shows a clear message instead of a spinner.
+    from app.services import backlink_service
+    from app.services.assistant import runner
+
+    backlink_service.recover_interrupted()
+    runner.recover_interrupted()
+    if poller.start():
+        logger.info("Ingestion is live.")
+
+
+@app.on_event("shutdown")
+async def _stop_poller() -> None:
+    """Cancel the poller so a reload does not leave a second one running."""
+    await poller.stop()
 
 
 @app.middleware("http")
@@ -113,21 +156,35 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-app.include_router(health.router, prefix="/api")
-app.include_router(engine.router, prefix="/api")
+# Signing in must not itself require being signed in.
+app.include_router(auth.router, prefix="/api")
+
+# Everything below carries the session requirement at the router level rather
+# than per-endpoint: a new route added to any of these files is protected by
+# default, which is the safe direction for a mistake to fall (spec §38).
+_SIGNED_IN = [Depends(current_user)]
+
+app.include_router(health.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(engine.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(conversations.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(activity.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(agents.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(assistant.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(platforms.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(insights.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(scans.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(search.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(replies.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(users.router, prefix="/api", dependencies=_SIGNED_IN)
+# No /api prefix: /r/{slug} is pasted into public messages, so it stays short.
+app.include_router(tracking.router)
 
 # Documented in the spec but not built yet. Without these a request to
 # /api/conversations returns a bare 404, which is indistinguishable from a
 # typo. 501 with a phase number says "this is coming", not "you got the URL
 # wrong". Removed as each route lands.
 PENDING_ROUTES: dict[str, int] = {
-    "/api/auth": 2,
-    "/api/conversations": 2,
-    "/api/activity": 2,
-    "/api/replies": 6,
-    "/api/insights": 8,
-    "/api/scans": 5,
-    "/api/platforms": 5,
+    "/api/auth": 3,
     "/api/safety": 4,
 }
 
@@ -146,16 +203,22 @@ async def api_root() -> dict:
     return {
         "name": "Signal API",
         "version": app.version,
-        "phase": 1,
+        "phase": 2,
         "docs": "/docs",
         "available": [
             "/api/health",
             "/api/health/ai",
             "/api/health/platforms",
+            "/api/platforms/discord",
             "/api/tuning",
             "/api/tuning/preview",
             "/api/tuning/non-negotiables",
             "/api/playground/analyze",
+            "/api/conversations",
+            "/api/activity",
+            "/api/insights/overview",
+            "/api/scans/run",
+            "/api/replies/{id}/send",
         ],
         "pending": {path: f"phase {phase}" for path, phase in PENDING_ROUTES.items()},
     }

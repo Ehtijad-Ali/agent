@@ -3,7 +3,7 @@
 import * as React from "react";
 import { PlaygroundInput, type PlaygroundForm } from "@/components/playground/playground-input";
 import { PlaygroundResults } from "@/components/playground/playground-results";
-import { analyseMessage, type AnalyseResult } from "@/lib/mockApi";
+import { analyseMessage, type AnalyseResult } from "@/lib/api";
 import { useSignalStore } from "@/stores/signal-store";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 

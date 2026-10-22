@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 MatchType = Literal["broad", "exact", "phrase"]
@@ -32,7 +32,15 @@ class KeywordRule(CamelModel):
     match_type: MatchType
     priority: int = Field(ge=1, le=5)
     weight: float
-    hits7d: int = 0
+    # to_camel() emits "hits7D", but the contract in src/lib/types.ts says
+    # "hits7d". Serialisation is pinned to the contract; validation accepts the
+    # old spelling too, so configuration_versions rows written before this was
+    # fixed still load instead of silently resetting to 0.
+    hits7d: int = Field(
+        default=0,
+        validation_alias=AliasChoices("hits7d", "hits7D"),
+        serialization_alias="hits7d",
+    )
 
 
 class NegativeKeywordRule(CamelModel):
@@ -40,7 +48,15 @@ class NegativeKeywordRule(CamelModel):
     term: str
     match_type: MatchType
     weight: float
-    hits7d: int = 0
+    # to_camel() emits "hits7D", but the contract in src/lib/types.ts says
+    # "hits7d". Serialisation is pinned to the contract; validation accepts the
+    # old spelling too, so configuration_versions rows written before this was
+    # fixed still load instead of silently resetting to 0.
+    hits7d: int = Field(
+        default=0,
+        validation_alias=AliasChoices("hits7d", "hits7D"),
+        serialization_alias="hits7d",
+    )
 
 
 class CountryRule(CamelModel):
@@ -48,6 +64,9 @@ class CountryRule(CamelModel):
     name: str
     priority: Priority
     enabled: bool = True
+    # Brief §5: "languages to use per country". Empty means fall back to
+    # voice.reply_language, so existing configs keep working unchanged.
+    language: str = ""
 
 
 class Thresholds(CamelModel):

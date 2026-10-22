@@ -73,6 +73,11 @@ const COMMUNITIES: Record<Platform, string[]> = {
     "r/gaming_communities",
     "r/predictiongames",
   ],
+  youtube: [
+    "Free prediction games ranked",
+    "Best sports picks apps 2026",
+    "Fantasy football for beginners",
+  ],
 };
 
 /* 60 hand-crafted messages. Spread across intent bands and risk flags. */

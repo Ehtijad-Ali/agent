@@ -7,14 +7,25 @@ import type {
   ActivityEntry,
 } from "../lib/types";
 import { DEFAULT_TUNING } from "../lib/constants";
-import { generateSeedConversations, generatePreviewSamples } from "../lib/seed";
+import { generatePreviewSamples } from "../lib/seed";
+import * as api from "../lib/api";
 
 /* ============================================================
    Zustand store — client state for the Signal app.
-   Hydrated from localStorage on mount to avoid SSR mismatch.
+
+   Conversations, config and activity come from the backend. Only UI
+   preferences are kept in localStorage: persisting server data there
+   meant a stale copy could outlive the row it described.
+
+   Preview samples in Tuning are still generated and scored client-side.
+   That is deliberate — they are a fixed synthetic set whose whole job is
+   to show the effect of a config change instantly (spec §21). They are
+   not discovered leads and never appear in the Inbox.
    ============================================================ */
 
-const STORAGE_KEY = "signal.v1";
+// v2: v1 held seeded conversations. Bumping the key means an old browser
+// profile is ignored rather than resurrecting fake data next to real rows.
+const STORAGE_KEY = "signal.v2";
 
 interface SignalState {
   // data
@@ -22,6 +33,11 @@ interface SignalState {
   config: TuningConfig;
   activity: ActivityEntry[];
   previewSamples: Conversation[];
+  /** Live credential status per platform (spec §29). Never includes tokens. */
+  platforms: api.PlatformStatus[];
+  /** When the most recent scan finished, ISO. Null until one has. */
+  lastScanAt: string | null;
+  scanning: boolean;
 
   // ui
   currentView: import("../lib/constants").ViewId;
@@ -39,6 +55,8 @@ interface SignalState {
 
   // loading
   loading: boolean;
+  /** Set when the backend is unreachable, so screens can say so. */
+  error: string | null;
 
   // draft config (Tuning) — committed via commitConfig
   draftConfig: TuningConfig | null;
@@ -50,6 +68,10 @@ interface SignalState {
 
   // actions
   hydrate: () => void;
+  refresh: () => Promise<void>;
+  refreshActivityOnly: () => Promise<void>;
+  runScan: () => Promise<api.ScanResult | null>;
+  sendReply: (id: string) => Promise<api.SendResult | string>;
   setConversations: (c: Conversation[]) => void;
   setConfig: (c: TuningConfig) => void;
   setDraftConfig: (c: TuningConfig) => void;
@@ -79,39 +101,36 @@ interface SignalState {
   resetAll: () => void;
 }
 
-function persistPartial(state: SignalState) {
+/** Only UI preferences. Server data is fetched, never cached here. */
+function persistPreferences(state: SignalState) {
   if (typeof window === "undefined") return;
-  const toStore = {
-    conversations: state.conversations,
-    config: state.config,
-    activity: state.activity,
-    onboardingComplete: state.onboardingComplete,
-    tourComplete: state.tourComplete,
-  };
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        onboardingComplete: state.onboardingComplete,
+        tourComplete: state.tourComplete,
+      }),
+    );
   } catch {
-    // ignore
+    // Private mode or blocked storage: preferences simply do not persist.
   }
 }
 
 const initialConfig: TuningConfig = JSON.parse(JSON.stringify(DEFAULT_TUNING));
-const initialConversations = generateSeedConversations(initialConfig);
-const initialPreviewSamples = generatePreviewSamples(initialConfig);
+
+let hydrating = false;
 
 export const useSignalStore = create<SignalState>((set, get) => ({
-  conversations: initialConversations,
+  // Empty until the first fetch resolves. The screens already render an empty
+  // state, which is the honest thing to show before any data has arrived.
+  conversations: [],
   config: initialConfig,
-  activity: [
-    {
-      id: "act_init",
-      timestamp: new Date().toISOString(),
-      actor: "system",
-      action: "Initial scan completed",
-      item: "—",
-    },
-  ],
-  previewSamples: initialPreviewSamples,
+  activity: [],
+  previewSamples: generatePreviewSamples(initialConfig),
+  platforms: [],
+  lastScanAt: null,
+  scanning: false,
   selectedConversationId: null,
   selectedIds: [],
   range: "7d",
@@ -125,6 +144,7 @@ export const useSignalStore = create<SignalState>((set, get) => ({
   sortKey: "relevance",
   query: "",
   loading: true,
+  error: null,
   draftConfig: null,
   hasUnsavedChanges: false,
   onboardingComplete: false,
@@ -132,35 +152,122 @@ export const useSignalStore = create<SignalState>((set, get) => ({
 
   hydrate: () => {
     if (typeof window === "undefined") return;
+    // Several views call hydrate() on mount; only the first should fetch.
+    if (hydrating) return;
+    hydrating = true;
+
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        set({ loading: false });
-        return;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        set({
+          onboardingComplete: parsed.onboardingComplete ?? false,
+          tourComplete: parsed.tourComplete ?? false,
+        });
       }
-      const parsed = JSON.parse(raw);
-      set({
-        conversations: parsed.conversations ?? initialConversations,
-        config: parsed.config ?? initialConfig,
-        activity: parsed.activity ?? [],
-        onboardingComplete: parsed.onboardingComplete ?? false,
-        tourComplete: parsed.tourComplete ?? false,
-        previewSamples: generatePreviewSamples(parsed.config ?? initialConfig),
-        loading: false,
-      });
     } catch {
-      set({ loading: false });
+      // Ignore unreadable preferences; the fetch below still runs.
+    }
+
+    void get().refresh();
+  },
+
+  refresh: async () => {
+    try {
+      const [conversations, config, activity, platforms] = await Promise.all([
+        api.listConversations(),
+        api.getConfig(),
+        api.listActivity(),
+        // A platform probe failing must not blank the Inbox, so it degrades to
+        // an empty list rather than rejecting the whole load.
+        api.getPlatformStatus().catch(() => []),
+      ]);
+      set({
+        conversations,
+        config,
+        activity,
+        platforms,
+        previewSamples: generatePreviewSamples(config),
+        loading: false,
+        error: null,
+      });
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "Could not load data.";
+      // Leave whatever is already on screen in place; replacing it with nothing
+      // would make a transient blip look like an empty inbox.
+      set({ loading: false, error: message });
     }
   },
 
-  setConversations: (c) => {
-    set({ conversations: c });
-    persistPartial(get());
+  /**
+   * Refetch just the audit log, after a write the server logged.
+   *
+   * Cheaper than a full refresh, and it keeps the Activity screen truthful
+   * without re-pulling every conversation on each triage keystroke.
+   */
+  refreshActivityOnly: async () => {
+    try {
+      set({ activity: await api.listActivity() });
+    } catch {
+      // The write itself succeeded; a stale log is not worth an error banner.
+    }
   },
 
+  runScan: async () => {
+    if (get().scanning) return null;
+    set({ scanning: true });
+    try {
+      const result = await api.runScan();
+      await get().refresh();
+      set({ lastScanAt: new Date().toISOString() });
+      return result;
+    } catch (cause) {
+      set({ error: cause instanceof Error ? cause.message : "Scan failed." });
+      return null;
+    } finally {
+      set({ scanning: false });
+    }
+  },
+
+  /**
+   * Post the approved reply to the platform.
+   *
+   * Returns the result, or the refusal message as a string. Deliberately not
+   * optimistic: nothing on screen changes until the platform has confirmed the
+   * message, because showing "replied" for a send that failed would be a lie
+   * about something already public.
+   */
+  sendReply: async (id) => {
+    try {
+      const result = await api.sendReply(id);
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === result.conversation.id ? result.conversation : c,
+        ),
+      }));
+      await get().refreshActivityOnly();
+      return result;
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "Could not send the reply.";
+      set({ error: message });
+      return message;
+    }
+  },
+
+  setConversations: (c) => set({ conversations: c }),
+
   setConfig: (c) => {
-    set({ config: c, draftConfig: null, hasUnsavedChanges: false, previewSamples: generatePreviewSamples(c) });
-    persistPartial(get());
+    set({
+      config: c,
+      draftConfig: null,
+      hasUnsavedChanges: false,
+      previewSamples: generatePreviewSamples(c),
+    });
+    void api.saveConfig(c).catch((cause) => {
+      set({ error: cause instanceof Error ? cause.message : "Could not save config." });
+    });
   },
 
   setDraftConfig: (c) => {
@@ -176,7 +283,14 @@ export const useSignalStore = create<SignalState>((set, get) => ({
       hasUnsavedChanges: false,
       previewSamples: generatePreviewSamples(draft),
     });
-    persistPartial(get());
+    void api
+      .saveConfig(draft)
+      .then(() => get().refreshActivityOnly())
+      .catch((cause) => {
+        set({
+          error: cause instanceof Error ? cause.message : "Could not save config.",
+        });
+      });
   },
 
   discardConfig: () => {
@@ -187,44 +301,73 @@ export const useSignalStore = create<SignalState>((set, get) => ({
     });
   },
 
-  updateConversation: (c) => {
+  /**
+   * Optimistic local update, then persist whatever actually changed.
+   *
+   * Components hand over a whole Conversation, so the change has to be
+   * recovered by diffing against the row we hold. Status goes to its §18 verb
+   * endpoint; reply edits go to /edit. On failure the previous row is put back,
+   * because a triage decision that silently did not save is worse than a
+   * visible error.
+   */
+  updateConversation: (next) => {
+    const previous = get().conversations.find((c) => c.id === next.id);
     set((s) => ({
-      conversations: s.conversations.map((x) => (x.id === c.id ? c : x)),
+      conversations: s.conversations.map((x) => (x.id === next.id ? next : x)),
     }));
-    persistPartial(get());
+    if (!previous) return;
+
+    const statusChanged = previous.status !== next.status;
+    const replyChanged =
+      previous.editedReply !== next.editedReply ||
+      previous.selectedVariant !== next.selectedVariant;
+
+    const calls: Promise<Conversation>[] = [];
+    if (statusChanged) calls.push(api.setStatus(next.id, next.status));
+    if (replyChanged) {
+      calls.push(
+        api.editReply(next.id, {
+          editedReply: next.editedReply ?? null,
+          selectedVariant: next.selectedVariant,
+        }),
+      );
+    }
+    if (calls.length === 0) return;
+
+    void Promise.all(calls)
+      .then((results) => {
+        // The last response is the freshest; it carries the server's history.
+        const authoritative = results[results.length - 1];
+        set((s) => ({
+          conversations: s.conversations.map((x) =>
+            x.id === authoritative.id ? authoritative : x,
+          ),
+        }));
+        return get().refreshActivityOnly();
+      })
+      .catch((cause) => {
+        set((s) => ({
+          conversations: s.conversations.map((x) =>
+            x.id === previous.id ? previous : x,
+          ),
+          error: cause instanceof Error ? cause.message : "Could not save change.",
+        }));
+      });
   },
 
   bulkUpdate: (ids, patch) => {
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
-        ids.includes(c.id)
-          ? {
-              ...c,
-              ...patch,
-              history: [
-                ...c.history,
-                {
-                  at: new Date().toISOString(),
-                  actor: "you",
-                  action: `Bulk update: ${Object.keys(patch).join(", ")}`,
-                },
-              ],
-            }
-          : c,
-      ),
-    }));
-    persistPartial(get());
+    const update = get().updateConversation;
+    for (const conversation of get().conversations) {
+      if (ids.includes(conversation.id)) {
+        update({ ...conversation, ...patch });
+      }
+    }
   },
 
-  pushActivity: (entry) => {
-    set((s) => ({ activity: [entry, ...s.activity] }));
-    persistPartial(get());
-  },
+  /** Local-only echo. The authoritative row is written server-side. */
+  pushActivity: (entry) => set((s) => ({ activity: [entry, ...s.activity] })),
 
-  setActivity: (a) => {
-    set({ activity: a });
-    persistPartial(get());
-  },
+  setActivity: (a) => set({ activity: a }),
 
   setSelectedConversationId: (id) => set({ selectedConversationId: id }),
   setSelectedIds: (ids) => set({ selectedIds: ids }),
@@ -248,11 +391,11 @@ export const useSignalStore = create<SignalState>((set, get) => ({
   setLoading: (b) => set({ loading: b }),
   setOnboardingComplete: (b) => {
     set({ onboardingComplete: b });
-    persistPartial(get());
+    persistPreferences(get());
   },
   setTourComplete: (b) => {
     set({ tourComplete: b });
-    persistPartial(get());
+    persistPreferences(get());
   },
 
   rescorePreviewSamples: () => {
@@ -260,31 +403,27 @@ export const useSignalStore = create<SignalState>((set, get) => ({
     set({ previewSamples: generatePreviewSamples(cfg) });
   },
 
+  /**
+   * Clears local UI state and reloads from the server.
+   *
+   * It does NOT delete conversations: they are discovered records, and a
+   * "reset to defaults" button in the UI must not silently destroy the audit
+   * trail. Wiping data is a backend operation, done deliberately.
+   */
   resetAll: () => {
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(STORAGE_KEY);
     }
-    const fresh: TuningConfig = JSON.parse(JSON.stringify(DEFAULT_TUNING));
     set({
-      conversations: generateSeedConversations(fresh),
-      config: fresh,
       draftConfig: null,
       hasUnsavedChanges: false,
-      previewSamples: generatePreviewSamples(fresh),
-      activity: [
-        {
-          id: "act_reset",
-          timestamp: new Date().toISOString(),
-          actor: "system",
-          action: "Reset to defaults",
-          item: "—",
-        },
-      ],
       onboardingComplete: false,
       tourComplete: false,
       selectedConversationId: null,
       selectedIds: [],
+      error: null,
     });
+    void get().refresh();
   },
 }));
 

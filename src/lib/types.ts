@@ -10,6 +10,7 @@ export const platformSchema = z.enum([
   "telegram",
   "facebook",
   "reddit",
+  "youtube",
 ]);
 export type Platform = z.infer<typeof platformSchema>;
 
@@ -29,6 +30,9 @@ export const statusSchema = z.enum([
   "snoozed",
   "manually_posted",
   "blocked",
+  // Posted by the bot via /api/replies/{id}/send. Kept distinct from
+  // manually_posted, which means a human posted it by hand.
+  "sent",
 ]);
 export type Status = z.infer<typeof statusSchema>;
 

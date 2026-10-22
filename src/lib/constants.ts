@@ -47,6 +47,12 @@ export const PLATFORMS: Record<
     color: "#FF4500",
     tosUrl: "https://www.redditinc.com/policies/user-agreement",
   },
+  youtube: {
+    label: "YouTube",
+    glyph: "▶️",
+    color: "#FF0000",
+    tosUrl: "https://www.youtube.com/t/terms",
+  },
 };
 
 export const INTENT_META: Record<
@@ -104,6 +110,7 @@ export const STATUS_META: Record<
   snoozed: { label: "Snoozed 24h", tone: "neutral" },
   manually_posted: { label: "Manually posted", tone: "success" },
   blocked: { label: "Blocked", tone: "risk" },
+  sent: { label: "Replied", tone: "success" },
 };
 
 export const SAVED_VIEWS = [
@@ -123,7 +130,11 @@ export const NAV_ITEMS = [
   { id: "playground", label: "Playground", icon: "flask-conical", shortcut: "G P" },
   { id: "tuning", label: "Tuning", icon: "sliders-horizontal", shortcut: "G U" },
   { id: "safety", label: "Safety", icon: "shield-check", shortcut: "G S" },
+  { id: "assistant", label: "AI Agent", icon: "sparkles", shortcut: "G H" },
+  { id: "agents", label: "Agents", icon: "bot", shortcut: "G G" },
+  { id: "platforms", label: "Platforms", icon: "plug", shortcut: "G C" },
   { id: "activity", label: "Activity", icon: "history", shortcut: "G A" },
+  { id: "users", label: "Users", icon: "users", shortcut: "G M" },
 ] as const;
 
 export type ViewId = (typeof NAV_ITEMS)[number]["id"];

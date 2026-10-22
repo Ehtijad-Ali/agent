@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-Platform = Literal["discord", "telegram", "facebook", "reddit"]
+Platform = Literal["discord", "telegram", "facebook", "reddit", "youtube"]
 ConnectionState = Literal["connected", "not_connected", "error", "not_implemented"]
 
 

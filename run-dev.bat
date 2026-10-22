@@ -102,6 +102,16 @@ if not exist "backend\.env" (
     )
 )
 
+REM ---------- Ollama (AI Agent) ----------
+REM Not fatal: everything except the AI Agent works without it.
+where ollama >nul 2>&1
+if errorlevel 1 (
+    echo  [warn] Ollama not found. The AI Agent needs it: https://ollama.com/download
+    echo         then run:  ollama pull qwen2.5:3b
+) else (
+    echo  [ok] Ollama installed ^(model set by OLLAMA_MODEL in backend\.env^)
+)
+
 REM ---------- launch ----------
 echo.
 echo  Starting services...

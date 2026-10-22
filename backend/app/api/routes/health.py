@@ -11,9 +11,11 @@ import httpx
 from fastapi import APIRouter
 
 from app.core.config import get_settings
-from app.integrations.base import FACEBOOK_REASON, REDDIT_REASON
+from app.db.session import session_scope
+from app.integrations.base import FACEBOOK_REASON
 from app.integrations.discord import DiscordConnector
 from app.integrations.telegram import TelegramConnector
+from app.services import sources_service
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -119,14 +121,42 @@ async def health_platforms() -> dict:
             }
         )
 
-    # Spec §46: never imply these are production-connected.
-    platforms.append(
-        {"platform": "reddit", "status": "not_implemented", "lastChecked": None,
-         "error": None, "detail": REDDIT_REASON}
-    )
+    # Discovery connectors: probed when their credentials are set, otherwise
+    # reported with exactly what is missing.
+    for name in ("reddit", "youtube"):
+        platforms.append(await _discovery_status(name))
+
+    # Spec §46: never imply this is production-connected.
     platforms.append(
         {"platform": "facebook", "status": "not_implemented", "lastChecked": None,
          "error": None, "detail": FACEBOOK_REASON}
     )
 
     return {"platforms": platforms}
+
+
+async def _discovery_status(platform: str) -> dict:
+    if not sources_service.is_configured(platform):
+        return {
+            "platform": platform,
+            "status": "not_connected",
+            "lastChecked": None,
+            "error": None,
+            "detail": sources_service.not_configured_detail(platform),
+        }
+    db = session_scope()
+    try:
+        connector = sources_service.build_connector(db, platform)
+    finally:
+        db.close()
+    if connector is None:
+        return {"platform": platform, "status": "not_connected", "lastChecked": None,
+                "error": None, "detail": "PSEUDONYM_SALT is not set."}
+    status = await connector.health_check()
+    return {
+        "platform": platform,
+        "status": status.status,
+        "lastChecked": status.last_checked.isoformat() if status.last_checked else None,
+        "error": status.error,
+        "detail": status.detail,
+    }

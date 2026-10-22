@@ -14,13 +14,17 @@ from __future__ import annotations
 
 import re
 
+from app.core.config import get_settings
 from app.schemas.tuning import VoiceConfig
 
 # Locked by the non-negotiable rules -- disclosure leads rather than trails, so
 # a reader skimming the first line sees the brand connection.
 DISCLOSURE = "Full disclosure, I work on Join All Bettors."
 FREE_TO_PLAY = "Free to play, no deposits, 18+."
-PRODUCT_URL = "https://joinallbettors.example"
+# Read once at import: these end up in published text, so they are
+# configuration, not literals buried in a service.
+PRODUCT_URL = get_settings().product_url
+PRODUCT_LABEL = get_settings().product_label
 
 TONES: tuple[str, ...] = ("helpful", "concise", "conversational")
 
@@ -53,14 +57,14 @@ def draft_reply(
 
     if tone == "concise":
         head = f"{greeting}. {DISCLOSURE}"
-        body = "It's a free prediction game, which sounds like what you're after."
+        body = f"{PRODUCT_LABEL} is a free prediction game, which sounds like what you're after."
         cta = f"{FREE_TO_PLAY} {PRODUCT_URL}"
     elif tone == "conversational":
         punctuation = "!" if high_friendliness else ","
         head = f"{greeting}{punctuation} Saw your post in {community}. {DISCLOSURE}"
         body = (
-            "We made a free social prediction game: pick outcomes, earn points, "
-            "climb a leaderboard. No money in it anywhere."
+            f"We made {PRODUCT_LABEL}, a free social prediction game: pick outcomes, "
+            "earn points, climb a leaderboard. No money in it anywhere."
         )
         link_phrase = "Want the link?" if high_cta else "Link's here if you fancy a look:"
         cta = f"{FREE_TO_PLAY} {link_phrase} {PRODUCT_URL}"
@@ -68,8 +72,8 @@ def draft_reply(
     else:  # helpful
         head = f"{greeting}, thanks for asking in {community}. {DISCLOSURE}"
         body = (
-            "It might be what you're after: pick outcomes, earn points, climb a "
-            "leaderboard, and no real money changes hands."
+            f"{PRODUCT_LABEL} might be what you're after: pick outcomes, earn points, "
+            "climb a leaderboard, and no real money changes hands."
         )
         link_phrase = "You can try it here:" if high_cta else "Link if it's useful:"
         cta = f"{FREE_TO_PLAY} {link_phrase} {PRODUCT_URL}"

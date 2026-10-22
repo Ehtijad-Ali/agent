@@ -21,7 +21,7 @@ const RELEVANT = (c: Conversation) =>
   c.intent !== "not_relevant" && c.riskFlags.length === 0;
 
 function buildRows(convos: Conversation[]): Row[] {
-  const platforms: Platform[] = ["discord", "telegram", "facebook", "reddit"];
+  const platforms: Platform[] = ["discord", "telegram", "reddit", "youtube", "facebook"];
   const rows = platforms.map((p) => ({
     platform: p,
     found: 0,

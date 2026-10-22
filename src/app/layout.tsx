@@ -29,7 +29,10 @@ export const metadata: Metadata = {
     "AI reply drafting",
   ],
   authors: [{ name: "Signal" }],
-  icons: { icon: "/logo.svg" },
+  // ?v= is a cache buster: Chrome keeps favicons in a separate store that
+  // survives hard reloads, so a changed icon needs a changed URL to be picked
+  // up. Bump this whenever public/logo.svg changes.
+  icons: { icon: "/logo.svg?v=2" },
 };
 
 export default function RootLayout({

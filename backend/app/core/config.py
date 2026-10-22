@@ -35,16 +35,55 @@ class Settings(BaseSettings):
     jwt_refresh_ttl_days: int = 14
     pseudonym_salt: str = ""
 
+    # --- scanning ---
+    # The brief specifies twice-daily scans plus manual runs. Times are UTC
+    # "HH:MM", comma separated. A non-zero scan_interval_seconds overrides them
+    # with a fixed interval, which is only useful in development.
+    scan_times: str = "09:00,21:00"
+    scan_interval_seconds: int = 0
+
+    # Where this backend is reachable from the public internet. Tracking links
+    # are built from it, so a wrong value produces links that do not resolve.
+    public_base_url: str = "http://localhost:8000"
+
+    # The destination every reply points at, and how the brand is written in
+    # prose. Configurable because it appears in text posted publicly: a wrong
+    # value here is not a bug report, it is a published message.
+    product_url: str = "https://www.all-bettors.com"
+    product_label: str = "All-Bettors.com"
+
     # --- AI (spec §14) ---
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = ""
     ollama_timeout_seconds: int = 60
+    # The AI Agent (assistant) can use a different model from reply drafting.
+    # Blank means "same as OLLAMA_MODEL". A small tool-calling model such as
+    # qwen2.5:3b keeps each step fast on a CPU-only server.
+    assistant_model: str = ""
+    # Each assistant step waits on the model; a cold CPU model can take a
+    # minute or more to load, so this is deliberately longer than the above.
+    assistant_timeout_seconds: int = 300
+    assistant_max_iterations: int = 8
+    # Optional hosted fallback. Used only when OLLAMA_MODEL is unset.
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.1-8b-instant"
 
     # --- platform credentials (spec §29 -- never leave this process) ---
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     discord_bot_token: str = ""
     discord_application_id: str = ""
+
+    # --- discovery connectors (read-only keyword search) ---
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    reddit_user_agent: str = "signal-discovery/0.1"
+    youtube_api_key: str = ""
+    # Telegram *account* (MTProto), not the bot. Needs Telethon and a session
+    # signed in once on the server -- see docs in the Platforms screen.
+    telegram_api_id: str = ""
+    telegram_api_hash: str = ""
+    telegram_session: str = "telegram_account"
 
     # --- CORS (spec §38) ---
     frontend_url: str = "http://localhost:3000"
@@ -61,6 +100,16 @@ class Settings(BaseSettings):
     @property
     def has_database(self) -> bool:
         return bool(self.database_url)
+
+    @property
+    def scan_time_list(self) -> list[str]:
+        """Configured scan times, normalised and de-duplicated."""
+        seen: list[str] = []
+        for raw in self.scan_times.split(","):
+            value = raw.strip()
+            if value and value not in seen:
+                seen.append(value)
+        return seen
 
     @field_validator("cors_allowed_origins")
     @classmethod

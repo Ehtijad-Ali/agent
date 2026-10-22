@@ -9,6 +9,10 @@ import { PlaygroundView } from "@/components/views/playground-view";
 import { InsightsView } from "@/components/views/insights-view";
 import { SafetyView } from "@/components/views/safety-view";
 import { ActivityView } from "@/components/views/activity-view";
+import { AgentsView } from "@/components/views/agents-view";
+import { AssistantView } from "@/components/views/assistant-view";
+import { PlatformsView } from "@/components/views/platforms-view";
+import { UsersView } from "@/components/views/users-view";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 import { useSignalStore } from "@/stores/signal-store";
 import type { ViewId } from "@/lib/constants";
@@ -36,6 +40,14 @@ function renderView(view: ViewId): React.ReactNode {
       return <SafetyView />;
     case "activity":
       return <ActivityView />;
+    case "assistant":
+      return <AssistantView />;
+    case "agents":
+      return <AgentsView />;
+    case "platforms":
+      return <PlatformsView />;
+    case "users":
+      return <UsersView />;
     case "inbox":
     default:
       return <InboxView />;

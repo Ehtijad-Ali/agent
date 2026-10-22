@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { logout } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useSignalStore } from "@/stores/signal-store";
 import {
@@ -11,6 +12,7 @@ import {
   Play,
   HelpCircle,
   PanelLeftOpen,
+  LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "next-themes";
@@ -31,7 +33,19 @@ export function TopBar() {
   const [mounted, setMounted] = React.useState(false);
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   const setCurrentView = useSignalStore((s) => s.setCurrentView);
+  const startScan = useSignalStore((s) => s.runScan);
+  const scanning = useSignalStore((s) => s.scanning);
+  const platforms = useSignalStore((s) => s.platforms);
+  const lastScanAt = useSignalStore((s) => s.lastScanAt);
+  const queueCount = useSignalStore(
+    (s) =>
+      s.conversations.filter(
+        (c) => c.status === "new" || c.status === "awaiting",
+      ).length,
+  );
   const { toast } = useToast();
+
+  const connected = platforms.filter((p) => p.status === "connected");
 
   React.useEffect(() => setMounted(true), []);
 
@@ -56,17 +70,59 @@ export function TopBar() {
     return () => window.removeEventListener("signal:close-palette", close);
   }, []);
 
-  function runScan() {
+  async function runScan() {
     toast({
       title: "Scan started",
-      description: "Listening across Discord, Telegram, Facebook, and Reddit.",
+      description: connected.length
+        ? `Polling ${connected.map((p) => p.platform).join(", ")}.`
+        : "No platform is connected yet.",
     });
-    setTimeout(() => {
+
+    const result = await startScan();
+    if (!result) {
       toast({
-        title: "Scan complete",
-        description: "Found 4 new conversations in the last 5 minutes.",
+        title: "Scan failed",
+        description:
+          useSignalStore.getState().error ?? "The backend did not respond.",
+        variant: "destructive",
       });
-    }, 1800);
+      return;
+    }
+    if (result.error) {
+      toast({
+        title: "Scan could not run",
+        description: result.error,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Report what actually happened. "Examined but nothing new" is the normal
+    // result of polling a quiet channel and must not read as a failure.
+    const failed = result.platforms.filter((p) => p.error);
+    toast({
+      title: result.discovered
+        ? `Found ${result.discovered} new conversation${result.discovered === 1 ? "" : "s"}`
+        : "No new conversations",
+      description: [
+        `Examined ${result.examined} message${result.examined === 1 ? "" : "s"}.`,
+        failed.length
+          ? `${failed.map((p) => `${p.platform}: ${p.error}`).join("; ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
+      variant: failed.length ? "destructive" : undefined,
+    });
+  }
+
+  function relativeTime(iso: string | null): string {
+    if (!iso) return "no scan yet";
+    const seconds = Math.max(0, Math.round((Date.now() - +new Date(iso)) / 1000));
+    if (seconds < 60) return "just now";
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    return `${Math.round(minutes / 60)}h ago`;
   }
 
   return (
@@ -102,14 +158,32 @@ export function TopBar() {
             <span
               className="hidden md:inline-flex items-center gap-1.5 text-xs text-text-muted px-2.5 py-1 rounded-pill border"
               role="status"
-              aria-label="Scan status: idle, last scan 4 minutes ago"
+              aria-label={
+                scanning
+                  ? "Scan status: running"
+                  : `Scan status: idle, last scan ${relativeTime(lastScanAt)}`
+              }
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-success" aria-hidden />
-              <span>Last scan 4m ago</span>
+              <span
+                className={cn(
+                  "w-1.5 h-1.5 rounded-full",
+                  scanning
+                    ? "bg-warning animate-pulse"
+                    : connected.length
+                      ? "bg-success"
+                      : "bg-text-muted",
+                )}
+                aria-hidden
+              />
+              <span>
+                {scanning ? "Scanning…" : `Last scan ${relativeTime(lastScanAt)}`}
+              </span>
             </span>
           </TooltipTrigger>
           <TooltipContent side="bottom">
-            Listening across 4 platforms · 60 conversations in queue
+            {connected.length
+              ? `Listening across ${connected.length} platform${connected.length === 1 ? "" : "s"} · ${queueCount} conversation${queueCount === 1 ? "" : "s"} in queue`
+              : "No platform connected. Add a bot token in backend/.env."}
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -117,11 +191,14 @@ export function TopBar() {
       <Button
         size="sm"
         onClick={runScan}
+        disabled={scanning}
         className="gap-1.5"
         aria-label="Run scan now"
       >
         <Play className="h-3.5 w-3.5" aria-hidden />
-        <span className="hidden sm:inline">Run scan</span>
+        <span className="hidden sm:inline">
+          {scanning ? "Scanning…" : "Run scan"}
+        </span>
       </Button>
 
       <TooltipProvider>
@@ -162,6 +239,8 @@ export function TopBar() {
         </Tooltip>
       </TooltipProvider>
 
+      <SignOutButton />
+
       {paletteOpen && (
         <PaletteContainer onClose={() => setPaletteOpen(false)} />
       )}
@@ -178,4 +257,37 @@ function PaletteContainer({ onClose }: { onClose: () => void }) {
     onClose();
   }, [onClose]);
   return null;
+}
+
+/** Ends the session and returns to the sign-in screen. */
+function SignOutButton() {
+  const [busy, setBusy] = React.useState(false);
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={busy}
+            aria-label="Sign out"
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await logout();
+              } finally {
+                // Navigate even if the request failed: the cookie may already
+                // be gone, and stranding the user on a dead session is worse
+                // than an extra trip through the login screen.
+                window.location.href = "/login";
+              }
+            }}
+          >
+            <LogOut className="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">Sign out</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }

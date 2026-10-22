@@ -20,11 +20,16 @@ import { cn } from "@/lib/utils";
    cap from config.rateCaps.
    ============================================================ */
 
-const PLATFORM_ORDER: Platform[] = ["discord", "telegram", "facebook", "reddit"];
+const PLATFORM_ORDER: Platform[] = ["discord", "telegram", "reddit", "youtube", "facebook"];
 
+// The seed data wrote "Status changed to approved"; the backend writes the §18
+// verb itself. Both are recognised so history from either source is counted.
 const APPROVE_ACTIONS = new Set([
   "Status changed to approved",
   "Status changed to manually_posted",
+  "approve",
+  "mark posted",
+  "sent reply",
 ]);
 
 /** Find the timestamp at which a conversation was approved.
@@ -56,7 +61,10 @@ export function UsageMeter({
   const approved = React.useMemo(
     () =>
       conversations.filter(
-        (c) => c.status === "approved" || c.status === "manually_posted",
+        (c) =>
+          c.status === "approved" ||
+          c.status === "manually_posted" ||
+          c.status === "sent",
       ),
     [conversations],
   );
@@ -75,6 +83,7 @@ export function UsageMeter({
       telegram: 0,
       facebook: 0,
       reddit: 0,
+      youtube: 0,
     };
     for (const c of approved) {
       if (approvedAt(c) >= hourAgo) {
