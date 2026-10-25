@@ -36,6 +36,8 @@ class UserOut(BaseModel):
     isActive: bool
     createdAt: datetime | None = None
     lastLoginAt: datetime | None = None
+    # Only on create: "sent", "not_configured", or why sending failed.
+    welcomeEmail: str | None = None
 
 
 class UserCreate(BaseModel):
@@ -115,7 +117,7 @@ def list_roles(_: User = Depends(current_user)) -> dict:
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def create_user(
-    body: UserCreate, db: Session = Depends(get_db), _: User = Depends(require_admin)
+    body: UserCreate, db: Session = Depends(get_db), admin: User = Depends(require_admin)
 ) -> UserOut:
     email = body.email.strip().lower()
     exists = db.execute(
@@ -133,7 +135,27 @@ def create_user(
     db.add(user)
     db.commit()
     db.refresh(user)
-    return _out(user)
+
+    out = _out(user)
+    out.welcomeEmail = _send_welcome(user, admin)
+    return out
+
+
+def _send_welcome(user: User, admin: User) -> str:
+    """Tell the new user their account exists. Never includes the password."""
+    from app.services import email_service
+
+    if not email_service.enabled():
+        return "not_configured"
+    role_label = {"admin": "Administrator", "operator": "Operator"}.get(user.role, user.role)
+    subject, body = email_service.welcome_text(
+        user.name, user.email, role_label, admin.name or admin.email
+    )
+    try:
+        email_service.send(user.email, subject, body)
+    except email_service.EmailError as exc:
+        return str(exc)
+    return "sent"
 
 
 @router.patch("/{user_id}", response_model=UserOut)

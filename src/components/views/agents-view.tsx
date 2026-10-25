@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Bot, Download, Loader2, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Bot, Download, FileSpreadsheet, Loader2, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import {
   type Agent,
@@ -14,6 +14,7 @@ import {
   deleteAgent,
   generateOutput,
   getAudit,
+  getIntegrations,
   listAgentTypes,
   listAgents,
   listOutputs,
@@ -21,6 +22,8 @@ import {
   remainingCities,
   startAudit,
   updateAgent,
+  writeAuditToSheet,
+  type Integrations,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -428,6 +431,26 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
   const [filter, setFilter] = React.useState<string>("all");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [integrations, setIntegrations] = React.useState<Integrations | null>(null);
+  const [sheetNote, setSheetNote] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    getIntegrations().then(setIntegrations).catch(() => setIntegrations(null));
+  }, []);
+
+  async function writeToSheet() {
+    setBusy(true);
+    setError(null);
+    setSheetNote(null);
+    try {
+      const result = await writeAuditToSheet(agent.id);
+      setSheetNote(`Wrote ${result.written} result(s) into column ${result.column} of your sheet.`);
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "Could not write to the sheet.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const load = React.useCallback(async () => {
     try {
@@ -525,6 +548,12 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
               </a>
             </Button>
           ) : null}
+          {audit && audit.items.length > 0 && !running && integrations?.googleSheets.configured ? (
+            <Button variant="outline" onClick={writeToSheet} disabled={busy}>
+              <FileSpreadsheet className="mr-2 h-4 w-4" />
+              Write to sheet (column {String(agent.rules.resultColumn ?? "B")})
+            </Button>
+          ) : null}
           {!agent.enabled ? (
             <span className="text-sm text-amber-600">Enable the agent to run it.</span>
           ) : null}
@@ -534,6 +563,18 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
       {error || audit?.error ? (
         <p role="alert" className="text-sm text-destructive">
           {error ?? audit?.error}
+        </p>
+      ) : null}
+      {sheetNote ? <p role="status" className="text-sm text-primary">{sheetNote}</p> : null}
+      {integrations?.googleSheets.configured && integrations.googleSheets.serviceAccountEmail ? (
+        <p className="text-xs text-muted-foreground">
+          To let Signal fill in your sheet, share it with{" "}
+          <span className="font-mono">{integrations.googleSheets.serviceAccountEmail}</span> as an Editor.
+        </p>
+      ) : integrations && audit && audit.items.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Writing results straight into the sheet needs a Google service account on the server.
+          Until then, Download CSV and paste the Result column into column B.
         </p>
       ) : null}
 

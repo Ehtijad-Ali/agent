@@ -793,7 +793,24 @@ export type PlatformUser = {
   isActive: boolean;
   createdAt: string | null;
   lastLoginAt: string | null;
+  /** Only on create: "sent", "not_configured", or why sending failed. */
+  welcomeEmail?: string | null;
 };
+
+/** Which optional services the server has set up (status only). */
+export type Integrations = {
+  email: { configured: boolean };
+  googleSheets: { configured: boolean; serviceAccountEmail: string | null };
+};
+
+export function getIntegrations(): Promise<Integrations> {
+  return request<Integrations>("/platforms/integrations");
+}
+
+/** Write the last audit's results into the agent's sheet, next to each URL. */
+export function writeAuditToSheet(agentId: string): Promise<{ written: number; column: string }> {
+  return request(`/agents/${agentId}/audit/sheet`, { method: "POST" });
+}
 
 export type RoleInfo = { id: string; label: string; description: string };
 

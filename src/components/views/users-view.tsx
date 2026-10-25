@@ -33,6 +33,7 @@ export function UsersView() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [adding, setAdding] = React.useState(false);
+  const [notice, setNotice] = React.useState<string | null>(null);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -111,11 +112,18 @@ export function UsersView() {
         <AddUser
           roles={roles}
           onCancel={() => setAdding(false)}
-          onDone={async () => {
+          onDone={async (message) => {
             setAdding(false);
+            setNotice(message);
             await refresh();
           }}
         />
+      ) : null}
+
+      {notice ? (
+        <p role="status" className="rounded-md border bg-muted/30 p-3 text-sm">
+          {notice}
+        </p>
       ) : null}
 
       <div className="overflow-x-auto rounded-lg border">
@@ -220,7 +228,7 @@ function AddUser({
 }: {
   roles: RoleInfo[];
   onCancel: () => void;
-  onDone: () => void;
+  onDone: (message: string) => void;
 }) {
   const [email, setEmail] = React.useState("");
   const [name, setName] = React.useState("");
@@ -234,8 +242,15 @@ function AddUser({
     setBusy(true);
     setError(null);
     try {
-      await createUser({ email, name, password, role });
-      onDone();
+      const created = await createUser({ email, name, password, role });
+      const status = created.welcomeEmail;
+      onDone(
+        status === "sent"
+          ? `Account created. A welcome email with the sign-in link was sent to ${created.email}. Share the password with them yourself; it is never emailed.`
+          : status === "not_configured"
+            ? `Account created for ${created.email}. Email is not set up on the server, so send them the sign-in link and password yourself.`
+            : `Account created for ${created.email}, but the welcome email failed: ${status}. Send them the sign-in details yourself.`,
+      );
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "Could not create the user.");
       setBusy(false);

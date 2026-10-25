@@ -109,6 +109,21 @@ class Settings(BaseSettings):
     # n8n webhook for every other event: lead status changes, sent replies and
     # finished scans (see events_service). Empty disables them.
     n8n_events_webhook_url: str = ""
+
+    # --- email (welcome emails for new users) ---
+    # Any SMTP provider. Port 465 uses SSL; other ports use STARTTLS when
+    # SMTP_STARTTLS is on. Unset SMTP_HOST means no email is sent.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+
+    # --- Google Sheets (writing audit results back into the sheet) ---
+    # Path to a service-account JSON key. Share each sheet with the account's
+    # email as an Editor. Unset means results are CSV download only.
+    google_service_account_file: str = ""
     lead_alert_min_score: int = 70
 
     # --- CORS (spec §38) ---

@@ -47,6 +47,20 @@ async def discord_overview() -> dict:
     }
 
 
+@router.get("/integrations")
+def integrations() -> dict:
+    """Which optional services are set up. Status only, never credentials."""
+    from app.services import email_service, google_sheets
+
+    return {
+        "email": {"configured": email_service.enabled()},
+        "googleSheets": {
+            "configured": google_sheets.configured(),
+            "serviceAccountEmail": google_sheets.service_account_email(),
+        },
+    }
+
+
 # --- discovery sources (Reddit, YouTube, Telegram account) -------------------
 
 SOURCE_KEYS = {

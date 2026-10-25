@@ -85,3 +85,5 @@ Signal-Platform-Response.pdf
 backend/*.session
 backend/*.session-journal
 deploy/.env
+backend/*.db.bak*
+*.db.bak*

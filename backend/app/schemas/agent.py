@@ -42,6 +42,8 @@ class BacklinkAuditRules(CamelModel):
     url_column: str = Field(default="A", min_length=1, max_length=3)
     target_domain: str = "all-bettors.com"
     max_urls: int = Field(default=10000, ge=1, le=10000)
+    # Where "Write to sheet" puts each result, next to its URL.
+    result_column: str = Field(default="B", min_length=1, max_length=3)
 
 
 class BacklinkCheckOut(CamelModel):

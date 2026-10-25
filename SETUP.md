@@ -194,6 +194,37 @@ Workflows can also call Signal, sending `X-Signal-Secret: <N8N_WEBHOOK_SECRET>`:
 These cannot approve, edit or send anything; that always needs a signed-in
 person. They are off while `N8N_WEBHOOK_SECRET` is empty.
 
+### Welcome emails for new users
+
+When an admin adds a user, Signal emails them the sign-in link (never the
+password, which the admin shares separately). Any SMTP provider works, e.g.
+Brevo's free plan or a Gmail account with an app password:
+
+```
+SMTP_HOST=smtp-relay.brevo.com
+SMTP_PORT=587
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+SMTP_FROM=Signal <noreply@joinallbettors.com>
+```
+
+Without these, adding a user still works and the Users page says to share the
+sign-in details yourself.
+
+### Writing audit results into the Google Sheet
+
+The backlink audit can fill column B of your sheet directly instead of you
+pasting the CSV:
+
+1. In console.cloud.google.com create a project, enable **Google Sheets API**,
+   then create a **service account** and download its JSON key.
+2. Copy the key to the server, e.g. `/opt/signal/google-service-account.json`
+   (`chmod 600`), and set `GOOGLE_SERVICE_ACCOUNT_FILE` to that path.
+3. Share each sheet with the service account's email (shown on the agent) as
+   an **Editor**.
+
+The agent then shows **Write to sheet (column B)** after an audit.
+
 ## 10. Check everything at a glance
 
 The two test scripts above are the quickest check. Each one says whether its bot

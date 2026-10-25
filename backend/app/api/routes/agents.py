@@ -542,6 +542,50 @@ def get_audit(agent_id: str, db: Session = Depends(get_db)) -> BacklinkAuditOut:
     )
 
 
+@router.post("/{agent_id}/audit/sheet")
+async def write_audit_to_sheet(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    """Write each result into the agent's sheet, next to its URL (column B by
+    default). Needs GOOGLE_SERVICE_ACCOUNT_FILE and the sheet shared with that
+    account as an Editor."""
+    from app.services import google_sheets
+
+    agent = _audit_agent(db, agent_id)
+    if _audits.get(agent_id, {}).get("status") == "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Wait for the audit to finish first."
+        )
+    if not google_sheets.configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Writing to Google Sheets is not set up on the server. Use Download CSV instead.",
+        )
+    rules = BacklinkAuditRules.model_validate(agent.rules or {})
+    rows = (
+        db.execute(select(BacklinkCheck).where(BacklinkCheck.agent_id == agent_id))
+        .scalars()
+        .all()
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Run the audit first; there are no results yet."
+        )
+    values = [(r.row, google_sheets.RESULT_LABELS.get(r.result, r.result)) for r in rows]
+    try:
+        written = await google_sheets.write_column(rules.sheet_url, rules.result_column, values)
+    except google_sheets.SheetsError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    db.add(
+        ActivityEntry(
+            actor=ACTOR,
+            action="wrote audit results to sheet",
+            item=agent.name,
+            after=f"{written} cell(s) in column {rules.result_column.upper()}",
+        )
+    )
+    db.commit()
+    return {"written": written, "column": rules.result_column.upper()}
+
+
 @router.get("/{agent_id}/audit.csv")
 def audit_csv(agent_id: str, db: Session = Depends(get_db)) -> Response:
     """Results in sheet order; the Result column pastes into column B."""
