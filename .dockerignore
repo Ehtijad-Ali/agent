@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+backend
+deploy/.env
+**/.env
+**/*.db
+**/*.db-*
+**/*.session
+*.log
+*.pdf
+plink.exe
+install-server-key.*
+signal-app

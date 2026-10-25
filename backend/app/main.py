@@ -22,6 +22,7 @@ from app.api.routes import (
     agents,
     assistant,
     auth,
+    automation,
     conversations,
     engine,
     health,
@@ -176,6 +177,8 @@ app.include_router(scans.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(search.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(replies.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(users.router, prefix="/api", dependencies=_SIGNED_IN)
+# n8n workflows authenticate with the shared secret, not a browser session.
+app.include_router(automation.router, prefix="/api")
 # No /api prefix: /r/{slug} is pasted into public messages, so it stays short.
 app.include_router(tracking.router)
 

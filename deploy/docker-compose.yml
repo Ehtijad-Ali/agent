@@ -1,0 +1,152 @@
+# Signal — full production stack for one VPS (Contabo).
+#
+#   caddy     HTTPS for signal.<domain> and n8n.<domain> (automatic certificates)
+#   frontend  Next.js app
+#   backend   FastAPI API + scheduled scans
+#   postgres  database for Signal and for n8n (two separate databases)
+#   redis     scan lock shared across processes
+#   ollama    local AI model (AI Agent, summaries, suggested replies)
+#   n8n       self-hosted automation, receives Signal events
+#
+# Usage (from this folder, see README.md):
+#   cp .env.example .env        # fill in the passwords
+#   docker compose up -d --build
+#   docker compose exec ollama ollama pull qwen2.5:3b
+#
+# Only Caddy publishes ports. Everything else is reachable only on the
+# internal network, so Postgres, Redis, Ollama and the API are never exposed.
+
+name: signal
+
+services:
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SIGNAL_DOMAIN: ${SIGNAL_DOMAIN}
+      N8N_DOMAIN: ${N8N_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+      - n8n
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        # Same origin as the page; Caddy routes /api to the backend.
+        NEXT_PUBLIC_API_BASE_URL: /api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend.Dockerfile
+    restart: unless-stopped
+    # Secrets (tokens, JWT, salt) come from backend/.env; the values below
+    # override only what differs inside the container network.
+    env_file: ../backend/.env
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://signal:${POSTGRES_PASSWORD}@postgres:5432/signal
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      N8N_BASE_URL: http://n8n:5678
+      N8N_WEBHOOK_URL: http://n8n:5678/webhook/signal-events
+      PUBLIC_BASE_URL: https://${SIGNAL_DOMAIN}
+      TELEGRAM_SESSION: data/telegram_account
+      FRONTEND_URL: https://${SIGNAL_DOMAIN}
+      CORS_ALLOWED_ORIGINS: https://${SIGNAL_DOMAIN}
+    volumes:
+      # Telegram account session (if used) survives rebuilds.
+      - backend_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: signal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: signal
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-n8n.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signal -d signal"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4.1-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:0.5.7
+    restart: unless-stopped
+    environment:
+      # Keep the model loaded between calls; loading is the slow part on CPU.
+      OLLAMA_KEEP_ALIVE: 30m
+    volumes:
+      - ollama_data:/root/.ollama
+
+  n8n:
+    image: n8nio/n8n:1.72.1
+    restart: unless-stopped
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: ${N8N_DOMAIN}
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${N8N_DOMAIN}/
+      GENERIC_TIMEZONE: ${TIMEZONE:-UTC}
+      # Lets the sample workflow read SIGNAL_SECRET to verify Signal's events.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      SIGNAL_SECRET: ${SIGNAL_N8N_SECRET}
+      SIGNAL_API_URL: http://backend:8000/api
+      N8N_DIAGNOSTICS_ENABLED: "false"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:
+  backend_data:
+  postgres_data:
+  redis_data:
+  ollama_data:
+  n8n_data:

@@ -1,0 +1,27 @@
+# HTTPS certificates are issued automatically once DNS points here.
+
+{$SIGNAL_DOMAIN} {
+	encode zstd gzip
+
+	# API, its docs, and the short tracking links go to FastAPI.
+	@backend path /api /api/* /docs /docs/* /redoc /openapi.json /r/*
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+{$N8N_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy n8n:5678
+}

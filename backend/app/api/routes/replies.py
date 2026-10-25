@@ -166,6 +166,13 @@ async def send(conversation_id: str, db: Session = Depends(get_db)) -> SendResul
         ) from exc
 
     db.refresh(conversation)
+    from app.services import events_service
+
+    events_service.emit(
+        "reply.sent",
+        {**events_service.lead_payload(conversation), "text": text,
+         "externalMessageId": external_message_id},
+    )
     return SendResult(
         external_message_id=external_message_id,
         text=text,

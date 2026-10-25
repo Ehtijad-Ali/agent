@@ -1,0 +1,125 @@
+{
+  "name": "Signal events",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "signal-events",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1f0c6b2-0001-4000-8000-000000000001",
+      "name": "Signal webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "signal-events"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.headers['x-signal-secret'] }}",
+              "rightValue": "={{ $env.SIGNAL_SECRET }}",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1f0c6b2-0002-4000-8000-000000000002",
+      "name": "From Signal?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.body.event }}", "rightValue": "lead.discovered", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "New lead"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.body.event }}", "rightValue": "reply.sent", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Reply sent"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.body.event }}", "rightValue": "scan.completed", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Scan finished"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "a1f0c6b2-0003-4000-8000-000000000003",
+      "name": "By event",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [440, -20]
+    },
+    {
+      "parameters": {},
+      "id": "a1f0c6b2-0004-4000-8000-000000000004",
+      "name": "Alert the team (replace with Telegram/Slack/Email)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [700, -160]
+    },
+    {
+      "parameters": {},
+      "id": "a1f0c6b2-0005-4000-8000-000000000005",
+      "name": "Log the send (replace with Google Sheets)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [700, -20]
+    },
+    {
+      "parameters": {},
+      "id": "a1f0c6b2-0006-4000-8000-000000000006",
+      "name": "Scan report (replace with a digest)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [700, 120]
+    }
+  ],
+  "connections": {
+    "Signal webhook": { "main": [[{ "node": "From Signal?", "type": "main", "index": 0 }]] },
+    "From Signal?": { "main": [[{ "node": "By event", "type": "main", "index": 0 }], []] },
+    "By event": {
+      "main": [
+        [{ "node": "Alert the team (replace with Telegram/Slack/Email)", "type": "main", "index": 0 }],
+        [{ "node": "Log the send (replace with Google Sheets)", "type": "main", "index": 0 }],
+        [{ "node": "Scan report (replace with a digest)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

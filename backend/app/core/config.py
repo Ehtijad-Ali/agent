@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     # --- AI (spec §14) ---
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = ""
-    ollama_timeout_seconds: int = 60
+    ollama_timeout_seconds: int = 120
+    # AI-written summaries and replies during a scan. Each is one model call,
+    # so a scan drafts at most this many with AI; the rest use templates.
+    ai_max_per_scan: int = 15
     # The AI Agent (assistant) can use a different model from reply drafting.
     # Blank means "same as OLLAMA_MODEL". A small tool-calling model such as
     # qwen2.5:3b keeps each step fast on a CPU-only server.
@@ -91,6 +94,9 @@ class Settings(BaseSettings):
 
     n8n_base_url: str = ""
     n8n_webhook_secret: str = ""
+    # The n8n Webhook node URL Signal posts events to (lead found, status
+    # changed, reply sent, scan finished). Blank turns events off.
+    n8n_webhook_url: str = ""
 
     @property
     def cors_origins(self) -> list[str]:

@@ -239,3 +239,132 @@ def test_invented_sheet_links_are_ignored(monkeypatch):
     )
     assert status == "ok"
     assert seen == []  # the made-up sheet was never fetched
+
+
+# --- automation (n8n) ----------------------------------------------------------
+
+
+def test_automation_needs_the_shared_secret(client, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "n8n_webhook_secret", "s3cret")
+    assert client.get("/api/automation/leads").status_code == 401
+    assert client.get("/api/automation/leads", headers={"X-Signal-Secret": "wrong"}).status_code == 401
+    ok = client.get("/api/automation/leads", headers={"X-Signal-Secret": "s3cret"})
+    assert ok.status_code == 200 and ok.json() == {"count": 0, "leads": []}
+
+
+def test_automation_disabled_without_secret(client, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "n8n_webhook_secret", "")
+    assert client.get("/api/automation/leads", headers={"X-Signal-Secret": ""}).status_code == 503
+
+
+def test_events_are_sent_only_when_configured(monkeypatch):
+    from app.core.config import get_settings
+    from app.services import events_service
+
+    sent: list = []
+    monkeypatch.setattr(events_service, "spawn", lambda coro: (sent.append(coro), coro.close()))
+    monkeypatch.setattr(get_settings(), "n8n_webhook_url", "")
+    events_service.emit("scan.completed", {})
+    assert sent == []
+    monkeypatch.setattr(get_settings(), "n8n_webhook_url", "https://n8n.example/webhook/x")
+    events_service.emit("scan.completed", {})
+    assert len(sent) == 1
+
+
+# --- scan lock -------------------------------------------------------------------
+
+
+def test_scan_lock_is_exclusive_without_redis():
+    from app.core.redis import scan_lock
+
+    with scan_lock() as first:
+        with scan_lock() as second:
+            assert first is True and second is False
+    with scan_lock() as again:
+        assert again is True
+
+
+# --- AI summaries and replies ----------------------------------------------------
+
+
+def _fake_ollama(monkeypatch, response_json: dict):
+    import json as _json
+
+    import httpx
+
+    from app.core.config import get_settings
+    from app.services import ai_service
+
+    monkeypatch.setattr(get_settings(), "ollama_model", "test-model")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": _json.dumps(response_json)}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    return ai_service
+
+
+def test_ai_drafts_always_carry_the_compliance_text(monkeypatch):
+    import re
+
+    from app.schemas.tuning import VoiceConfig
+
+    ai_service = _fake_ollama(
+        monkeypatch,
+        {
+            "language": "es",
+            "summary": "The person wants a free prediction game to play with friends.",
+            "replies": {
+                t: {"opening": "¡Hola 😀", "body": "Es perfecto para ti, visita https://evil.example ahora."}
+                for t in ("helpful", "concise", "conversational")
+            },
+        },
+    )
+    draft = asyncio.run(ai_service.draft("¿Alguien conoce un juego?", "futbol", VoiceConfig(), "es"))
+    assert draft is not None and draft.language == "es"
+    for variant in draft.variants:
+        text = variant["text"]
+        assert re.search(r"full disclosure.*i work on join all bettors", text, re.I)
+        assert "Free to play, no deposits, 18+." in text
+        assert "evil.example" not in text  # the model may not add its own links
+        assert "😀" not in text  # emoji removed at the default emoji setting
+        assert len(text) <= VoiceConfig().max_length
+
+
+def test_incomplete_ai_answer_falls_back_to_templates(monkeypatch):
+    from app.schemas.tuning import VoiceConfig
+
+    ai_service = _fake_ollama(monkeypatch, {"language": "en", "summary": "x", "replies": {}})
+    assert asyncio.run(ai_service.draft("hi", "c", VoiceConfig())) is None
+
+
+def test_non_english_summary_is_dropped(monkeypatch):
+    from app.schemas.tuning import VoiceConfig
+
+    replies = {t: {"opening": "Hola", "body": "Es un juego gratis."} for t in ("helpful", "concise", "conversational")}
+    ai_service = _fake_ollama(
+        monkeypatch, {"language": "es", "summary": "Una persona busca un juego gratuito.", "replies": replies}
+    )
+    draft = asyncio.run(ai_service.draft("¿Alguien?", "c", VoiceConfig(), "es"))
+    assert draft is not None and draft.summary is None

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +29,9 @@ from app.models import ActivityEntry, Conversation, ScanRun
 from app.schemas.tuning import TuningConfig
 from app.services.reply_service import detect_language, draft_all_variants
 from app.services.scoring_service import ScoreResult, score_message
+
+if TYPE_CHECKING:
+    from app.services.ai_service import AIDraft
 
 logger = logging.getLogger("signal.ingestion")
 
@@ -97,14 +101,29 @@ def active_config() -> TuningConfig:
 
 
 def normalise_to_conversation(
-    msg: NormalisedMessage, config: TuningConfig
+    msg: NormalisedMessage, config: TuningConfig, ai: "AIDraft | None" = None
 ) -> Conversation:
-    """Score one normalised message into an unsaved Conversation row."""
+    """Score one normalised message into an unsaved Conversation row.
+
+    ``ai`` replaces the template summary and drafts when the model produced
+    them; risk-flagged messages never get a draft either way.
+    """
     country = msg.country or None
     result = score_message(msg.message, config, country, msg.posted_at)
 
     blocked = bool(result.risk_flags)
     variants = [] if blocked else draft_all_variants(msg.community, config.voice)
+    summary = build_summary(msg.message, result.matched_keywords, result.risk_flags)
+    language = msg.language or detect_language(msg.message)
+    history = [
+        {"at": datetime.now(UTC).isoformat(), "actor": "system", "action": "discovered by scan"}
+    ]
+    if ai is not None and not blocked:
+        variants, language = ai.variants, ai.language
+        summary = ai.summary or summary
+        history.append(
+            {"at": datetime.now(UTC).isoformat(), "actor": "system", "action": "AI drafted summary and replies"}
+        )
 
     return Conversation(
         platform=msg.platform,
@@ -115,7 +134,7 @@ def normalise_to_conversation(
         message=msg.message,
         posted_at=msg.posted_at,
         country=country or UNKNOWN_COUNTRY,
-        language=msg.language or detect_language(msg.message),
+        language=language,
         score=result.score,
         intent=result.intent,
         confidence=result.confidence,
@@ -125,18 +144,12 @@ def normalise_to_conversation(
             for c in result.contributions
         ],
         risk_flags=list(result.risk_flags),
-        summary=build_summary(msg.message, result.matched_keywords, result.risk_flags),
+        summary=summary,
         status=initial_status(result),
         reply_variants=variants,
         selected_variant=0,
         edited_reply=None,
-        history=[
-            {
-                "at": datetime.now(UTC).isoformat(),
-                "actor": "system",
-                "action": "discovered by scan",
-            }
-        ],
+        history=history,
     )
 
 
@@ -196,11 +209,48 @@ def _existing_external_ids(db: Session, platform: str, ids: list[str]) -> set[st
     return set(rows)
 
 
+async def ai_drafts_for(
+    db: Session, platform: str, messages: list[NormalisedMessage], config: TuningConfig
+) -> dict[str, "AIDraft"]:
+    """AI summaries and replies for the new, relevant messages in a batch.
+
+    Only messages that are not stored yet, carry no risk flag and reach the
+    "low intent" threshold, and at most AI_MAX_PER_SCAN of them: each draft
+    is a model call, which on a CPU server is tens of seconds.
+    """
+    from app.services import ai_service
+
+    if not ai_service.enabled():
+        return {}
+    settings = get_settings()
+    seen = _existing_external_ids(db, platform, [m.external_id for m in messages])
+    candidates: list[tuple[int, NormalisedMessage]] = []
+    for msg in messages:
+        if msg.external_id in seen:
+            continue
+        result = score_message(msg.message, config, msg.country or None, msg.posted_at)
+        if result.risk_flags or result.score < config.thresholds.low:
+            continue
+        candidates.append((result.score, msg))
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+
+    drafts: dict[str, ai_service.AIDraft] = {}
+    for _, msg in candidates[: settings.ai_max_per_scan]:
+        draft = await ai_service.draft(
+            msg.message, msg.community, config.voice, msg.language or detect_language(msg.message)
+        )
+        if draft is None:
+            break  # the model is down or misbehaving; templates for the rest
+        drafts[msg.external_id] = draft
+    return drafts
+
+
 def persist_messages(
     db: Session,
     platform: str,
     messages: list[NormalisedMessage],
     config: TuningConfig,
+    ai: dict[str, "AIDraft"] | None = None,
 ) -> int:
     """Insert only messages not already stored. Returns the number added."""
     if not messages:
@@ -208,12 +258,14 @@ def persist_messages(
 
     seen = _existing_external_ids(db, platform, [m.external_id for m in messages])
     added = 0
+    new_leads: list[Conversation] = []
 
     for msg in messages:
         if msg.external_id in seen:
             continue
         seen.add(msg.external_id)
-        db.add(normalise_to_conversation(msg, config))
+        row = normalise_to_conversation(msg, config, (ai or {}).get(msg.external_id))
+        db.add(row)
         try:
             # Flush per row: one row violating a constraint must not discard
             # the whole batch.
@@ -223,8 +275,15 @@ def persist_messages(
             logger.info("Skipping duplicate %s:%s", platform, msg.external_id)
             continue
         added += 1
+        if row.intent in ("high", "medium") and not row.risk_flags:
+            new_leads.append(row)
 
     db.commit()
+    if new_leads:
+        from app.services import events_service
+
+        for row in new_leads:
+            events_service.emit("lead.discovered", events_service.lead_payload(row))
     return added
 
 
@@ -235,6 +294,28 @@ async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
     abort the others: partial success has to be visible, or a dead token looks
     identical to a quiet channel.
     """
+    from app.core.redis import scan_lock
+
+    with scan_lock() as acquired:
+        if not acquired:
+            scan.status = "failed"
+            scan.error = "Another scan is already running. Try again when it finishes."
+            scan.finished_at = datetime.now(UTC)
+            db.commit()
+            return scan
+        await _run_scan_locked(db, scan)
+    from app.services import events_service
+
+    events_service.emit(
+        "scan.completed",
+        {"scanId": scan.id, "status": scan.status, "trigger": scan.trigger,
+         "examined": scan.examined, "discovered": scan.discovered,
+         "platforms": scan.platforms, "error": scan.error},
+    )
+    return scan
+
+
+async def _run_scan_locked(db: Session, scan: ScanRun) -> ScanRun:
     config = active_config()
     connectors = build_connectors() + build_discovery_connectors(db)
     outcomes: list[dict] = []
@@ -273,7 +354,8 @@ async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
             )
             continue
 
-        added = persist_messages(db, connector.platform, messages, config)
+        drafts = await ai_drafts_for(db, connector.platform, messages, config)
+        added = persist_messages(db, connector.platform, messages, config, drafts)
         total_examined += len(messages)
         total_added += added
         outcomes.append(
