@@ -336,6 +336,32 @@ def persist_messages(
 
 
 async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
+    """Run one scan, unless another is already running anywhere.
+
+    The lock lives in Redis when REDIS_URL is set, so it also holds across
+    processes; otherwise it holds within this one.
+    """
+    from app.core.redis import scan_lock
+    from app.services import events_service
+
+    with scan_lock() as acquired:
+        if not acquired:
+            scan.status = "failed"
+            scan.error = "Another scan is already running. Try again when it finishes."
+            scan.finished_at = datetime.now(UTC)
+            db.commit()
+            return scan
+        await _run_scan_locked(db, scan)
+    events_service.emit(
+        "scan.completed",
+        {"scanId": scan.id, "status": scan.status, "trigger": scan.trigger,
+         "examined": scan.examined, "discovered": scan.discovered,
+         "platforms": scan.platforms, "error": scan.error},
+    )
+    return scan
+
+
+async def _run_scan_locked(db: Session, scan: ScanRun) -> ScanRun:
     """Poll every connected platform once and record the outcome.
 
     A connector that fails is recorded against its own platform and does not

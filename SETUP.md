@@ -172,6 +172,28 @@ After each scan, Signal posts the new leads at or above that score (platform,
 community, score, summary, message and link) with an `X-Signal-Secret` header
 carrying `N8N_WEBHOOK_SECRET`.
 
+### More events, and n8n calling Signal
+
+Besides new leads, Signal can post every **status change**, **sent reply** and
+**finished scan** to a second webhook (path `signal-events`; a ready workflow
+is in `deploy/n8n/signal-events.workflow.json`, import it from n8n's menu):
+
+```
+N8N_EVENTS_WEBHOOK_URL=http://127.0.0.1:5678/n8n/webhook/signal-events
+```
+
+Each event is `{"event": "...", "at": "...", "data": {...}}` with the same
+`X-Signal-Secret` header. Events are `lead.status_changed`, `reply.sent` and
+`scan.completed`.
+
+Workflows can also call Signal, sending `X-Signal-Secret: <N8N_WEBHOOK_SECRET>`:
+
+- `POST https://signal.joinallbettors.com/api/automation/scan` starts a scan
+- `GET  https://signal.joinallbettors.com/api/automation/leads?minScore=60&hours=24`
+
+These cannot approve, edit or send anything; that always needs a signed-in
+person. They are off while `N8N_WEBHOOK_SECRET` is empty.
+
 ## 10. Check everything at a glance
 
 The two test scripts above are the quickest check. Each one says whether its bot

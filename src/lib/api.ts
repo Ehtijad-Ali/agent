@@ -154,6 +154,14 @@ export function editReply(
   });
 }
 
+/**
+ * Rewrite the summary and the three reply drafts with the AI model.
+ * Replaces any manual edit. Can take a minute on a CPU-only server.
+ */
+export function aiRedraft(id: string): Promise<Conversation> {
+  return request<Conversation>(`/conversations/${id}/ai-draft`, { method: "POST" });
+}
+
 /* ---------------- tuning ---------------- */
 
 export function getConfig(): Promise<TuningConfig> {

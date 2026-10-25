@@ -11,6 +11,8 @@ import httpx
 from fastapi import APIRouter
 
 from app.core.config import get_settings
+from app.core.redis import redis_status
+from app.services import events_service
 from app.integrations.base import FACEBOOK_REASON
 from app.integrations.discord import DiscordConnector
 from app.integrations.telegram import TelegramConnector
@@ -27,8 +29,10 @@ async def health() -> dict:
         "subsystems": {
             "engine": "ok",
             "database": "configured" if settings.has_database else "not_configured",
-            "redis": "configured" if settings.redis_url else "not_configured",
+            "redis": redis_status(),
             "ollama": "configured" if settings.ollama_model else "not_configured",
+            "n8n": await events_service.n8n_status(),
+            "n8nEvents": "on" if events_service.enabled() else "off",
         },
     }
 

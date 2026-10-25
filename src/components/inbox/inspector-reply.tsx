@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Check, Copy, RefreshCw } from "lucide-react";
+import { Check, Copy, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import type { Conversation } from "@/lib/types";
 
 const TONES = [
@@ -21,6 +21,7 @@ interface ReplyProps {
   onVariantChange: (index: number) => void;
   onEditReply: (text: string) => void;
   onToast: (msg: string) => void;
+  onAiRedraft?: () => Promise<void>;
 }
 
 export function InspectorReply({
@@ -30,7 +31,9 @@ export function InspectorReply({
   onVariantChange,
   onEditReply,
   onToast,
+  onAiRedraft,
 }: ReplyProps) {
+  const [redrafting, setRedrafting] = React.useState(false);
   const draft = c.editedReply ?? c.replyVariants[c.selectedVariant]?.text ?? "";
 
   const hasUrl = /https?:\/\//i.test(draft);
@@ -120,6 +123,29 @@ export function InspectorReply({
             <RefreshCw className="h-3.5 w-3.5" />
             Regenerate
           </Button>
+          {onAiRedraft ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={redrafting}
+              title="Let the AI read the post and rewrite the summary and all three drafts"
+              onClick={async () => {
+                setRedrafting(true);
+                try {
+                  await onAiRedraft();
+                } finally {
+                  setRedrafting(false);
+                }
+              }}
+            >
+              {redrafting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+              {redrafting ? "Drafting…" : "Redraft with AI"}
+            </Button>
+          ) : null}
           <Button variant="ghost" size="sm" onClick={handleCopy}>
             <Copy className="h-3.5 w-3.5" />
             Copy for manual posting

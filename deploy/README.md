@@ -1,4 +1,11 @@
-# Deploying Signal on a VPS
+# Deploying Signal on a new VPS
+
+> **The current production server does not use this.** signal.joinallbettors.com
+> runs the API and web app as systemd services (`signal-api`, `signal-web`)
+> with Postgres, Redis, Ollama and n8n in Docker from `/opt/signal`; see
+> `SETUP.md`. This Compose stack is for setting up a fresh server. Do not run
+> it on the existing one: it uses the same `signal` project name and would
+> replace those containers.
 
 One `docker compose` stack runs everything: Caddy (HTTPS), the Next.js
 frontend, the FastAPI backend, PostgreSQL, Redis, Ollama and n8n. Only ports

@@ -22,6 +22,7 @@ from app.api.routes import (
     agents,
     assistant,
     auth,
+    automation,
     conversations,
     engine,
     health,
@@ -73,6 +74,10 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _validate_configuration() -> None:
+    from app.utils.background import capture_loop
+
+    # Lets sync routes hand events to n8n without blocking the request.
+    capture_loop()
     problems = settings.validate_for_production()
     if problems:
         raise RuntimeError("Invalid production configuration: " + "; ".join(problems))
@@ -182,6 +187,8 @@ app.include_router(search.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(replies.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(users.router, prefix="/api", dependencies=_SIGNED_IN)
 # No /api prefix: /r/{slug} is pasted into public messages, so it stays short.
+# n8n workflows authenticate with the shared secret, not a browser session.
+app.include_router(automation.router, prefix="/api")
 app.include_router(tracking.router)
 
 # Documented in the spec but not built yet. Without these a request to

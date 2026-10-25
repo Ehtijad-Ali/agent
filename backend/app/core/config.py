@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     # n8n webhook that receives strong new leads after each scan, e.g.
     # http://127.0.0.1:5678/n8n/webhook/new-lead. Empty disables it.
     n8n_lead_webhook_url: str = ""
+    # n8n webhook for every other event: lead status changes, sent replies and
+    # finished scans (see events_service). Empty disables them.
+    n8n_events_webhook_url: str = ""
     lead_alert_min_score: int = 70
 
     # --- CORS (spec §38) ---

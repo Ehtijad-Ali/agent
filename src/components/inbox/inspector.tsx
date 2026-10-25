@@ -83,6 +83,22 @@ export function Inspector({
     [conversation, updateConversation],
   );
 
+  const handleAiRedraft = React.useCallback(async () => {
+    if (!conversation) return;
+    try {
+      const updated = await api.aiRedraft(conversation.id);
+      const { conversations, setConversations } = useSignalStore.getState();
+      setConversations(conversations.map((c) => (c.id === updated.id ? updated : c)));
+      toast({ title: "AI rewrote the summary and drafts", duration: 2400 });
+    } catch (cause) {
+      toast({
+        title: "AI redraft failed",
+        description: cause instanceof api.ApiError ? cause.message : "Try again.",
+        variant: "destructive",
+      });
+    }
+  }, [conversation, toast]);
+
   const handleEditReply = React.useCallback(
     (text: string) => {
       if (!conversation) return;
@@ -130,6 +146,7 @@ export function Inspector({
                   textareaRef={replyRef}
                   onVariantChange={handleVariantChange}
                   onEditReply={handleEditReply}
+                  onAiRedraft={conversation.riskFlags.length ? undefined : handleAiRedraft}
                   onToast={(msg) => toast({ title: msg, duration: 2400 })}
                 />
               </div>
