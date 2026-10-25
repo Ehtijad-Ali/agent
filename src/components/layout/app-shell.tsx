@@ -18,8 +18,8 @@ import {
   Menu,
   Bot,
   Users,
-  Sparkles,
   Plug,
+  Sparkles,
 } from "lucide-react";
 import { TopBar } from "./top-bar";
 import { CommandPalette } from "./command-palette";

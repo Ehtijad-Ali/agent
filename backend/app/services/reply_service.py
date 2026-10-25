@@ -33,6 +33,7 @@ def draft_reply(
     community: str,
     tone: str,
     voice: VoiceConfig,
+    body_override: str | None = None,
 ) -> str:
     """Build one variant, guaranteeing the mandatory parts survive the length cap.
 
@@ -79,12 +80,24 @@ def draft_reply(
         cta = f"{FREE_TO_PLAY} {link_phrase} {PRODUCT_URL}"
         emoji = " 🎯" if high_emoji else ""
 
+    # An AI-written body answers the author's actual question; the head
+    # (disclosure) and tail (free-to-play, 18+, link) stay fixed, so an AI
+    # draft clears the same safety check as a template one.
+    if body_override and body_override.strip():
+        body = " ".join(body_override.split())
     return _assemble(head, body, cta, emoji, voice.max_length)
 
 
-def draft_all_variants(community: str, voice: VoiceConfig) -> list[dict[str, str]]:
+def draft_all_variants(
+    community: str,
+    voice: VoiceConfig,
+    bodies: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
     """The three variants the frontend expects, in its expected order."""
-    return [{"tone": t, "text": draft_reply(community, t, voice)} for t in TONES]
+    bodies = bodies or {}
+    return [
+        {"tone": t, "text": draft_reply(community, t, voice, bodies.get(t))} for t in TONES
+    ]
 
 
 def _assemble(head: str, body: str, cta: str, emoji: str, limit: int) -> str:

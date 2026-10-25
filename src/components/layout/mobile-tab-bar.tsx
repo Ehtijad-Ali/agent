@@ -13,8 +13,8 @@ import {
   History,
   Bot,
   Users,
-  Sparkles,
   Plug,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 

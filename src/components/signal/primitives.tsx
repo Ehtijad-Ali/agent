@@ -311,7 +311,9 @@ export function PlatformBadge({
           ? "Facebook"
           : platform === "reddit"
             ? "Reddit"
-            : platform;
+            : platform === "youtube"
+              ? "YouTube"
+              : platform;
   const glyph =
     platform === "discord"
       ? "🎮"
@@ -321,7 +323,9 @@ export function PlatformBadge({
           ? "📘"
           : platform === "reddit"
             ? "👽"
-            : "•";
+            : platform === "youtube"
+              ? "▶️"
+              : "•";
   return (
     <span
       className={cn(

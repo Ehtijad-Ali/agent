@@ -11,12 +11,9 @@ import httpx
 from fastapi import APIRouter
 
 from app.core.config import get_settings
-from app.db.session import session_scope
 from app.integrations.base import FACEBOOK_REASON
 from app.integrations.discord import DiscordConnector
 from app.integrations.telegram import TelegramConnector
-from app.core.redis import redis_status
-from app.services import events_service, sources_service
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -30,10 +27,8 @@ async def health() -> dict:
         "subsystems": {
             "engine": "ok",
             "database": "configured" if settings.has_database else "not_configured",
-            "redis": redis_status(),
+            "redis": "configured" if settings.redis_url else "not_configured",
             "ollama": "configured" if settings.ollama_model else "not_configured",
-            "n8n": await events_service.n8n_status(),
-            "n8nEvents": "on" if events_service.enabled() else "off",
         },
     }
 
@@ -124,11 +119,18 @@ async def health_platforms() -> dict:
             }
         )
 
-    # Discovery connectors: probed when their credentials are set, otherwise
-    # reported with exactly what is missing.
-    for name in ("reddit", "youtube"):
-        platforms.append(await _discovery_status(name))
-
+    # Discovery connectors: reported as connected only when credentials exist;
+    # the live check is on /api/platforms/status/{platform}.
+    for name, ok, how in (
+        ("reddit", settings.reddit_client_id and settings.reddit_client_secret,
+         "Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET on the server."),
+        ("youtube", settings.youtube_api_key, "Set YOUTUBE_API_KEY on the server."),
+    ):
+        platforms.append(
+            {"platform": name, "status": "connected" if ok else "not_connected",
+             "lastChecked": None, "error": None,
+             "detail": "Credentials set. See Platforms for a live check." if ok else how}
+        )
     # Spec §46: never imply this is production-connected.
     platforms.append(
         {"platform": "facebook", "status": "not_implemented", "lastChecked": None,
@@ -136,30 +138,3 @@ async def health_platforms() -> dict:
     )
 
     return {"platforms": platforms}
-
-
-async def _discovery_status(platform: str) -> dict:
-    if not sources_service.is_configured(platform):
-        return {
-            "platform": platform,
-            "status": "not_connected",
-            "lastChecked": None,
-            "error": None,
-            "detail": sources_service.not_configured_detail(platform),
-        }
-    db = session_scope()
-    try:
-        connector = sources_service.build_connector(db, platform)
-    finally:
-        db.close()
-    if connector is None:
-        return {"platform": platform, "status": "not_connected", "lastChecked": None,
-                "error": None, "detail": "PSEUDONYM_SALT is not set."}
-    status = await connector.health_check()
-    return {
-        "platform": platform,
-        "status": status.status,
-        "lastChecked": status.last_checked.isoformat() if status.last_checked else None,
-        "error": status.error,
-        "detail": status.detail,
-    }

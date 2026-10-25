@@ -33,7 +33,7 @@ AGENT_TYPES: tuple[str, ...] = (
     "engagement",
     # Generates per-location classified-ad content for manual posting (§2).
     "content",
-    # Checks the pages listed in a Google Sheet for a dofollow link to us.
+    # Checks a sheet of pages for a dofollow link to the target domain.
     "backlink_audit",
 )
 

@@ -24,7 +24,7 @@ from app.db.session import get_db
 from app.models import ActivityEntry, Conversation, ReplySend
 from app.schemas.conversation import ConversationOut
 from app.schemas.reply import ReplyPreview, SendResult, UsageOut
-from app.services.ingestion_service import build_connectors
+from app.services.ingestion_service import sender_for
 from app.services.safety_service import check_reply, outgoing_text, usage
 from app.services.tracking_service import apply_tracking, ensure_link
 
@@ -87,8 +87,16 @@ async def send(conversation_id: str, db: Session = Depends(get_db)) -> SendResul
             detail="Reply refused by the safety check: " + " ".join(problems),
         )
 
-    connector = dict(build_connectors()).get(conversation.platform)
+    connector = sender_for(conversation.platform)
     if connector is None:
+        if conversation.platform in ("reddit", "youtube", "facebook"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Replies on {conversation.platform.capitalize()} are posted by hand: "
+                    "open the original post, reply there, then click Mark posted."
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
@@ -166,13 +174,6 @@ async def send(conversation_id: str, db: Session = Depends(get_db)) -> SendResul
         ) from exc
 
     db.refresh(conversation)
-    from app.services import events_service
-
-    events_service.emit(
-        "reply.sent",
-        {**events_service.lead_payload(conversation), "text": text,
-         "externalMessageId": external_message_id},
-    )
     return SendResult(
         external_message_id=external_message_id,
         text=text,

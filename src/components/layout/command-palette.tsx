@@ -26,8 +26,8 @@ import {
   Play,
   Bot,
   Users,
-  Sparkles,
   Plug,
+  Sparkles,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useToast } from "@/hooks/use-toast";

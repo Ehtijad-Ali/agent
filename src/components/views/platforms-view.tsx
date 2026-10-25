@@ -1,13 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, RefreshCw, UserPlus } from "lucide-react";
+import { ExternalLink, Loader2, RefreshCw } from "lucide-react";
 
 import {
   type DiscordOverview,
-  type DiscoveryPlatform,
-  type DiscoverySource,
   type PlatformStatus,
+  type SourceInfo,
+  type SourcePlatform,
+  type SourceSettings,
   ApiError,
   getDiscordOverview,
   getPlatformStatus,
@@ -20,12 +21,13 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 /**
- * Platforms — where the bots can read, and what discovery searches for.
+ * Platforms — connect the bots to the communities they should read.
  *
- * Discord and Telegram bots only see communities they were added to, so this
- * screen hands out the invite and shows which channels are actually readable.
- * Reddit, YouTube and the Telegram account search public content by keyword;
- * their search terms are edited here, their credentials live on the server.
+ * Neither Discord nor Telegram lets a bot find or join communities on its own:
+ * a server admin invites it (Discord) or a group admin adds it (Telegram).
+ * This screen hands the operator the right invite link and shows exactly which
+ * channels the bot can read, so "connected but sees nothing" is visible here
+ * rather than discovered in an empty Inbox.
  */
 export function PlatformsView() {
   const [discord, setDiscord] = React.useState<DiscordOverview | null>(null);
@@ -51,8 +53,8 @@ export function PlatformsView() {
     void refresh();
   }, [refresh]);
 
-  const telegram = statuses.find((p) => p.platform === "telegram");
-  const botHandle = telegram?.detail?.match(/@\w+/)?.[0];
+  const telegram = statuses.find((s) => s.platform === "telegram");
+  const botName = telegram?.detail?.match(/@\w+/)?.[0];
 
   return (
     <div className="flex h-full flex-col gap-4 p-4 md:p-6">
@@ -75,10 +77,7 @@ export function PlatformsView() {
       </header>
 
       {error ? (
-        <p
-          role="alert"
-          className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-        >
+        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
           {error}
         </p>
       ) : null}
@@ -95,7 +94,7 @@ export function PlatformsView() {
           {discord?.inviteUrl ? (
             <Button asChild>
               <a href={discord.inviteUrl} target="_blank" rel="noreferrer">
-                <UserPlus className="mr-2 h-4 w-4" /> Add bot to a server
+                <ExternalLink className="mr-2 h-4 w-4" /> Add bot to a server
               </a>
             </Button>
           ) : null}
@@ -106,13 +105,13 @@ export function PlatformsView() {
             <p className="text-xs text-muted-foreground">
               Not an admin of the server? Send this link to someone who is:
             </p>
-            <code className="block break-all rounded-md bg-muted p-2 text-xs">
-              {discord.inviteUrl}
-            </code>
+            <code className="block break-all rounded-md bg-muted p-2 text-xs">{discord.inviteUrl}</code>
           </div>
         ) : null}
 
-        {discord?.error ? <p className="text-sm text-destructive">{discord.error}</p> : null}
+        {discord?.error ? (
+          <p className="text-sm text-destructive">{discord.error}</p>
+        ) : null}
 
         {discord?.connected ? (
           discord.servers.length === 0 ? (
@@ -136,21 +135,17 @@ export function PlatformsView() {
                       <p className="mt-1 text-sm text-destructive">{server.error}</p>
                     ) : (
                       <div className="mt-2 flex flex-wrap gap-1.5">
-                        {server.channels.map((channel) => (
+                        {server.channels.map((c) => (
                           <span
-                            key={channel.id}
-                            title={
-                              channel.readable
-                                ? "Readable"
-                                : "Blocked: give the bot's role View Channel and Read Message History here"
-                            }
+                            key={c.id}
+                            title={c.readable ? "Readable" : "Blocked: give the bot's role View Channel and Read Message History here"}
                             className={`rounded px-2 py-0.5 text-xs ${
-                              channel.readable
+                              c.readable
                                 ? "bg-primary/10 text-primary"
                                 : "bg-destructive/10 text-destructive line-through"
                             }`}
                           >
-                            #{channel.name}
+                            #{c.name}
                           </span>
                         ))}
                       </div>
@@ -169,42 +164,42 @@ export function PlatformsView() {
 
       <section className="space-y-2 rounded-lg border bg-card p-4">
         <h2 className="font-medium">Telegram</h2>
-        <p className="text-sm text-muted-foreground">{telegram?.detail ?? "Status unavailable."}</p>
+        <p className="text-sm text-muted-foreground">
+          {telegram?.detail ?? "Status unavailable."}
+        </p>
         {telegram?.error ? <p className="text-sm text-destructive">{telegram.error}</p> : null}
         <ol className="list-decimal space-y-1 pl-5 text-sm">
           <li>Open the group in Telegram → group name → Add members.</li>
-          <li>Search for {botHandle ?? "the bot"} and add it. You need to be a group admin.</li>
+          <li>Search for {botName ?? "the bot"} and add it. You need to be a group admin.</li>
           <li>Post a message in the group, then press Run scan. It appears in the Inbox.</li>
         </ol>
         <p className="text-xs text-muted-foreground">
-          Telegram bots cannot search or join public groups on their own. To
-          read public groups by keyword, use the Telegram account below.
+          Telegram bots cannot search or join public groups on their own. To read
+          public groups by keyword, use the Telegram account below.
         </p>
       </section>
 
       <h2 className="pt-2 text-lg font-semibold tracking-tight">Discovery: find people anywhere</h2>
       <p className="-mt-2 text-sm text-muted-foreground">
         These search public posts and comments by keyword, so they find people
-        who are not in your communities. They only read; you reply on the
-        platform yourself.
+        who are not in your communities. They only read; you reply on the platform yourself.
       </p>
-
       {SOURCES.map((source) => (
-        <DiscoverySourceCard key={source.platform} source={source} />
+        <SourceCard key={source.platform} source={source} />
       ))}
     </div>
   );
 }
 
-type SourceDef = {
-  platform: DiscoveryPlatform;
+type SourceField = { key: keyof SourceSettings; label: string; hint: string };
+
+const SOURCES: {
+  platform: SourcePlatform;
   title: string;
   description: string;
   setup: string[];
-  fields: { key: string; label: string; hint: string }[];
-};
-
-const SOURCES: SourceDef[] = [
+  fields: SourceField[];
+}[] = [
   {
     platform: "reddit",
     title: "Reddit",
@@ -231,11 +226,7 @@ const SOURCES: SourceDef[] = [
       "Send the key to your developer to add on the server.",
     ],
     fields: [
-      {
-        key: "queries",
-        label: "Search terms",
-        hint: "One per line. Each costs 100 of the 10,000 daily quota units per scan.",
-      },
+      { key: "queries", label: "Search terms", hint: "One per line. Each costs 100 of the 10,000 daily quota units per scan." },
       { key: "channel_ids", label: "Channels to watch (optional)", hint: "One channel id per line, e.g. UC..." },
     ],
   },
@@ -251,37 +242,29 @@ const SOURCES: SourceDef[] = [
     ],
     fields: [
       { key: "queries", label: "Search terms", hint: "One per line, e.g. football predictions" },
-      {
-        key: "chats",
-        label: "Public groups/channels to watch (optional)",
-        hint: "One per line, e.g. @groupname or https://t.me/groupname",
-      },
+      { key: "chats", label: "Public groups/channels to watch (optional)", hint: "One per line, e.g. @groupname or https://t.me/groupname" },
     ],
   },
 ];
 
-function DiscoverySourceCard({ source }: { source: SourceDef }) {
-  const [data, setData] = React.useState<DiscoverySource | null>(null);
-  const [status, setStatus] = React.useState<{
-    status: PlatformStatus["status"];
-    detail: string | null;
-    error: string | null;
-  } | null>(null);
-  const [values, setValues] = React.useState<Record<string, string>>({});
+function SourceCard({ source }: { source: (typeof SOURCES)[number] }) {
+  const [info, setInfo] = React.useState<SourceInfo | null>(null);
+  const [status, setStatus] = React.useState<{ status: string; detail: string | null; error: string | null } | null>(null);
+  const [draft, setDraft] = React.useState<Record<string, string>>({});
   const [saving, setSaving] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let alive = true;
-    (async () => {
+    void (async () => {
       try {
         const all = await getSources();
         if (!alive) return;
         const mine = all[source.platform];
-        setData(mine);
-        setValues(
+        setInfo(mine);
+        setDraft(
           Object.fromEntries(
-            source.fields.map((f) => [f.key, (mine.settings[f.key] ?? []).join("\n")]),
+            source.fields.map((f) => [f.key, ((mine.settings[f.key] as string[] | undefined) ?? []).join("\n")]),
           ),
         );
         if (mine.configured) setStatus(await getSourceStatus(source.platform));
@@ -298,16 +281,10 @@ function DiscoverySourceCard({ source }: { source: SourceDef }) {
     setSaving(true);
     setMessage(null);
     try {
-      const settings = Object.fromEntries(
-        source.fields.map((f) => [
-          f.key,
-          (values[f.key] ?? "")
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean),
-        ]),
-      );
-      setData(await updateSources(source.platform, settings));
+      const body = Object.fromEntries(
+        source.fields.map((f) => [f.key, (draft[f.key] ?? "").split("\n").map((l) => l.trim()).filter(Boolean)]),
+      ) as unknown as SourceSettings;
+      setInfo(await updateSources(source.platform, body));
       setMessage("Saved. The next scan uses these.");
     } catch (cause) {
       setMessage(cause instanceof ApiError ? cause.message : "Could not save.");
@@ -317,7 +294,6 @@ function DiscoverySourceCard({ source }: { source: SourceDef }) {
   }
 
   const connected = status?.status === "connected";
-
   return (
     <section className="space-y-3 rounded-lg border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -334,14 +310,14 @@ function DiscoverySourceCard({ source }: { source: SourceDef }) {
                 : "bg-muted text-muted-foreground"
           }`}
         >
-          {data === null ? "…" : connected ? "Connected" : status?.status === "error" ? "Error" : "Not set up"}
+          {info === null ? "…" : connected ? "Connected" : status?.status === "error" ? "Error" : "Not set up"}
         </span>
       </div>
 
       {status?.detail ? <p className="text-sm">{status.detail}</p> : null}
       {status?.error ? <p className="text-sm text-destructive">{status.error}</p> : null}
 
-      {data && !data.configured ? (
+      {info && !info.configured ? (
         <div className="rounded-md bg-muted/40 p-3 text-sm">
           <p className="mb-1 font-medium">To connect</p>
           <ol className="list-decimal space-y-0.5 pl-5">
@@ -353,23 +329,22 @@ function DiscoverySourceCard({ source }: { source: SourceDef }) {
       ) : null}
 
       <div className="grid gap-3 md:grid-cols-2">
-        {source.fields.map((field) => (
-          <div key={field.key} className="space-y-1">
-            <Label htmlFor={`${source.platform}-${field.key}`}>{field.label}</Label>
+        {source.fields.map((f) => (
+          <div key={f.key} className="space-y-1">
+            <Label htmlFor={`${source.platform}-${f.key}`}>{f.label}</Label>
             <Textarea
-              id={`${source.platform}-${field.key}`}
+              id={`${source.platform}-${f.key}`}
               rows={4}
-              value={values[field.key] ?? ""}
-              onChange={(e) => setValues((cur) => ({ ...cur, [field.key]: e.target.value }))}
-              disabled={saving || data === null}
+              value={draft[f.key] ?? ""}
+              onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))}
+              disabled={saving || info === null}
             />
-            <p className="text-xs text-muted-foreground">{field.hint}</p>
+            <p className="text-xs text-muted-foreground">{f.hint}</p>
           </div>
         ))}
       </div>
-
       <div className="flex items-center gap-3">
-        <Button size="sm" onClick={save} disabled={saving || data === null}>
+        <Button size="sm" onClick={save} disabled={saving || info === null}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {message ? <span className="text-sm text-muted-foreground">{message}</span> : null}

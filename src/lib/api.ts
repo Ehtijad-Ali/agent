@@ -154,14 +154,6 @@ export function editReply(
   });
 }
 
-/**
- * Rewrite the summary and the three reply drafts with the local AI model.
- * Replaces any manual edit. Can take a minute on a CPU-only server.
- */
-export function aiRedraft(id: string): Promise<Conversation> {
-  return request<Conversation>(`/conversations/${id}/ai-draft`, { method: "POST" });
-}
-
 /* ---------------- tuning ---------------- */
 
 export function getConfig(): Promise<TuningConfig> {
@@ -232,6 +224,186 @@ export interface PlatformStatus {
 export async function getPlatformStatus(): Promise<PlatformStatus[]> {
   const body = await request<{ platforms: PlatformStatus[] }>("/health/platforms");
   return body.platforms;
+}
+
+export interface DiscordServer {
+  id: string;
+  name: string;
+  channels: { id: string; name: string; readable: boolean }[];
+  error: string | null;
+}
+
+export interface DiscordOverview {
+  connected: boolean;
+  /** Link a server admin opens to add the bot to their server. */
+  inviteUrl: string | null;
+  servers: DiscordServer[];
+  error: string | null;
+}
+
+export function getDiscordOverview(): Promise<DiscordOverview> {
+  return request<DiscordOverview>("/platforms/discord");
+}
+
+export type SourcePlatform = "reddit" | "youtube" | "telegram_account";
+
+export interface SourceSettings {
+  queries: string[];
+  subreddits?: string[];
+  channel_ids?: string[];
+  chats?: string[];
+}
+
+export interface SourceInfo {
+  configured: boolean;
+  settings: SourceSettings;
+}
+
+export function getSources(): Promise<Record<SourcePlatform, SourceInfo>> {
+  return request<Record<SourcePlatform, SourceInfo>>("/platforms/sources");
+}
+
+export function updateSources(platform: SourcePlatform, settings: SourceSettings): Promise<SourceInfo> {
+  return request<SourceInfo>(`/platforms/sources/${platform}`, {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+
+export function getSourceStatus(
+  platform: SourcePlatform,
+): Promise<{ status: string; detail: string | null; error: string | null }> {
+  return request(`/platforms/status/${platform}`);
+}
+
+/* ---------------- AI agent chat ---------------- */
+
+export type AgentTaskStatus =
+  | "pending"
+  | "running"
+  | "waiting_approval"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface AgentChat {
+  id: string;
+  title: string;
+  instructions: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string | Record<string, unknown> };
+}
+
+export interface AgentMessage {
+  id: string;
+  seq: number;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  toolCalls: AgentToolCall[] | null;
+  toolCallId: string | null;
+  name: string | null;
+  status: string | null;
+  taskId: string | null;
+  createdAt: string;
+}
+
+export interface AgentTask {
+  id: string;
+  status: AgentTaskStatus;
+  iterations: number;
+  toolCalls: number;
+  tokensUsed: number;
+  error: string | null;
+  pendingAction: { name: string; arguments: Record<string, unknown> } | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface AgentFile {
+  id: string;
+  taskId: string;
+  filename: string;
+  rows: number;
+  createdAt: string;
+}
+
+export interface AgentChatDetail {
+  chat: AgentChat;
+  messages: AgentMessage[];
+  tasks: AgentTask[];
+  files: AgentFile[];
+  configured: boolean;
+}
+
+export interface AgentStatus {
+  configured: boolean;
+  provider: "ollama" | "groq";
+  model: string;
+  tools: { name: string; description: string; requiresApproval: boolean }[];
+}
+
+export function getAgentStatus(): Promise<AgentStatus> {
+  return request<AgentStatus>("/assistant/status");
+}
+
+export function listAgentChats(): Promise<AgentChat[]> {
+  return request<AgentChat[]>("/assistant/chats");
+}
+
+export function createAgentChat(body: { title?: string; instructions?: string } = {}): Promise<AgentChat> {
+  return request<AgentChat>("/assistant/chats", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function getAgentChat(id: string): Promise<AgentChatDetail> {
+  return request<AgentChatDetail>(`/assistant/chats/${id}`);
+}
+
+export function updateAgentChat(
+  id: string,
+  patch: { title?: string; instructions?: string },
+): Promise<AgentChat> {
+  return request<AgentChat>(`/assistant/chats/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteAgentChat(id: string): Promise<void> {
+  return request<void>(`/assistant/chats/${id}`, { method: "DELETE" });
+}
+
+export function clearAgentChat(id: string): Promise<void> {
+  return request<void>(`/assistant/chats/${id}/clear`, { method: "POST" });
+}
+
+/** Starts a task; the agent runs in the background. Poll getAgentChat. */
+export function sendAgentMessage(chatId: string, content: string): Promise<AgentTask> {
+  return request<AgentTask>(`/assistant/chats/${chatId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function cancelAgentTask(taskId: string): Promise<AgentTask> {
+  return request<AgentTask>(`/assistant/tasks/${taskId}/cancel`, { method: "POST" });
+}
+
+export function decideAgentTask(taskId: string, approve: boolean): Promise<AgentTask> {
+  return request<AgentTask>(`/assistant/tasks/${taskId}/decision`, {
+    method: "POST",
+    body: JSON.stringify({ approve }),
+  });
+}
+
+export function agentFileUrl(fileId: string): string {
+  return `${API_BASE}/assistant/files/${fileId}`;
 }
 
 /* ---------------- playground ---------------- */
@@ -429,17 +601,7 @@ export async function listOutputs(
   return page.items;
 }
 
-export function markOutputPublished(
-  outputId: string,
-  publishedUrl: string,
-): Promise<AgentOutput> {
-  return request<AgentOutput>(`/agents/outputs/${outputId}/publish`, {
-    method: "POST",
-    body: JSON.stringify({ publishedUrl }),
-  });
-}
-
-/* ---------------- backlink audits ---------------- */
+/* ---------------- backlink audit agents ---------------- */
 
 export type BacklinkResult = "dofollow" | "nofollow" | "not_found" | "error";
 
@@ -456,8 +618,7 @@ export interface BacklinkCheck {
 }
 
 export interface BacklinkAudit {
-  /** idle (never run), running, completed or failed. */
-  status: string;
+  status: "idle" | "running" | "completed" | "failed";
   total: number;
   done: number;
   error: string | null;
@@ -467,209 +628,28 @@ export interface BacklinkAudit {
   items: BacklinkCheck[];
 }
 
-export function getAudit(agentId: string): Promise<BacklinkAudit> {
-  return request<BacklinkAudit>(`/agents/${agentId}/audit`);
-}
-
 /** Start checking every URL in the agent's sheet. Poll getAudit for progress. */
-export function startAudit(agentId: string): Promise<BacklinkAudit> {
-  return request<BacklinkAudit>(`/agents/${agentId}/audit`, { method: "POST" });
+export function startAudit(id: string): Promise<BacklinkAudit> {
+  return request<BacklinkAudit>(`/agents/${id}/audit`, { method: "POST" });
 }
 
-/** A plain link, so the browser downloads it with the session cookie. */
-export function auditCsvUrl(agentId: string): string {
-  return `${API_BASE}/agents/${agentId}/audit.csv`;
+export function getAudit(id: string): Promise<BacklinkAudit> {
+  return request<BacklinkAudit>(`/agents/${id}/audit`);
 }
 
-/* ---------------- AI Agent (assistant) ---------------- */
-
-export interface AgentTool {
-  name: string;
-  description: string;
-  requiresApproval: boolean;
+/** Direct link for the CSV download; the session cookie goes with it. */
+export function auditCsvUrl(id: string): string {
+  return `${API_BASE}/agents/${id}/audit.csv`;
 }
 
-export interface AgentStatus {
-  configured: boolean;
-  provider: "ollama" | "groq";
-  model: string;
-  tools: AgentTool[];
-}
-
-export interface AgentChat {
-  id: string;
-  title: string;
-  instructions: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AgentToolCall {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: Record<string, unknown> | string };
-}
-
-export interface AgentMessage {
-  id: string;
-  seq: number;
-  role: "user" | "assistant" | "tool";
-  content: string;
-  toolCalls: AgentToolCall[] | null;
-  toolCallId: string | null;
-  name: string | null;
-  status: string | null;
-  taskId: string | null;
-  createdAt: string;
-}
-
-export type AgentTaskStatus =
-  | "pending"
-  | "running"
-  | "waiting_approval"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-export interface AgentTask {
-  id: string;
-  status: AgentTaskStatus;
-  iterations: number;
-  toolCalls: number;
-  tokensUsed: number;
-  error: string | null;
-  pendingAction: { name: string; arguments: Record<string, unknown>; toolCallId: string } | null;
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-}
-
-export interface AgentFile {
-  id: string;
-  taskId: string;
-  filename: string;
-  rows: number;
-  createdAt: string;
-}
-
-export interface AgentChatDetail {
-  chat: AgentChat;
-  messages: AgentMessage[];
-  tasks: AgentTask[];
-  files: AgentFile[];
-  configured: boolean;
-}
-
-export function getAgentStatus(): Promise<AgentStatus> {
-  return request<AgentStatus>("/assistant/status");
-}
-
-export function listAgentChats(): Promise<AgentChat[]> {
-  return request<AgentChat[]>("/assistant/chats");
-}
-
-export function createAgentChat(
-  body: { title?: string; instructions?: string } = {},
-): Promise<AgentChat> {
-  return request<AgentChat>("/assistant/chats", {
+export function markOutputPublished(
+  outputId: string,
+  publishedUrl: string,
+): Promise<AgentOutput> {
+  return request<AgentOutput>(`/agents/outputs/${outputId}/publish`, {
     method: "POST",
-    body: JSON.stringify(body),
+    body: JSON.stringify({ publishedUrl }),
   });
-}
-
-export function getAgentChat(id: string): Promise<AgentChatDetail> {
-  return request<AgentChatDetail>(`/assistant/chats/${id}`);
-}
-
-export function updateAgentChat(
-  id: string,
-  patch: { title?: string; instructions?: string },
-): Promise<AgentChat> {
-  return request<AgentChat>(`/assistant/chats/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
-}
-
-export function deleteAgentChat(id: string): Promise<void> {
-  return request<void>(`/assistant/chats/${id}`, { method: "DELETE" });
-}
-
-/** Forget the messages but keep the chat and its instructions. */
-export function clearAgentChat(id: string): Promise<void> {
-  return request<void>(`/assistant/chats/${id}/clear`, { method: "POST" });
-}
-
-/** Starts a task; the reply arrives by polling getAgentChat. */
-export function sendAgentMessage(id: string, content: string): Promise<AgentTask> {
-  return request<AgentTask>(`/assistant/chats/${id}/messages`, {
-    method: "POST",
-    body: JSON.stringify({ content }),
-  });
-}
-
-export function cancelAgentTask(id: string): Promise<AgentTask> {
-  return request<AgentTask>(`/assistant/tasks/${id}/cancel`, { method: "POST" });
-}
-
-/** Approve or decline the action the agent is waiting on. */
-export function decideAgentTask(id: string, approve: boolean): Promise<AgentTask> {
-  return request<AgentTask>(`/assistant/tasks/${id}/decision`, {
-    method: "POST",
-    body: JSON.stringify({ approve }),
-  });
-}
-
-export function agentFileUrl(id: string): string {
-  return `${API_BASE}/assistant/files/${id}`;
-}
-
-/* ---------------- platforms ---------------- */
-
-export interface DiscordOverview {
-  connected: boolean;
-  inviteUrl: string | null;
-  servers: {
-    id: string;
-    name: string;
-    channels: { id: string; name: string; readable: boolean }[];
-    error: string | null;
-  }[];
-  error: string | null;
-}
-
-export function getDiscordOverview(): Promise<DiscordOverview> {
-  return request<DiscordOverview>("/platforms/discord");
-}
-
-export type DiscoveryPlatform = "reddit" | "youtube" | "telegram_account";
-
-export interface DiscoverySource {
-  configured: boolean;
-  settings: Record<string, string[]>;
-}
-
-export function getSources(): Promise<Record<DiscoveryPlatform, DiscoverySource>> {
-  return request("/platforms/sources");
-}
-
-export function updateSources(
-  platform: DiscoveryPlatform,
-  settings: Record<string, string[]>,
-): Promise<DiscoverySource> {
-  return request<DiscoverySource>(`/platforms/sources/${platform}`, {
-    method: "PUT",
-    body: JSON.stringify(settings),
-  });
-}
-
-/** Live check of one discovery connector. */
-export function getSourceStatus(platform: DiscoveryPlatform): Promise<{
-  status: PlatformStatus["status"];
-  detail: string | null;
-  error: string | null;
-}> {
-  return request(`/platforms/status/${platform}`);
 }
 
 /* ---------------- engagement + refinement (brief §1, §8) ---------------- */

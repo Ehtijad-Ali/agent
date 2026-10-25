@@ -4,6 +4,7 @@ import * as React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  AlertTriangle,
   Check,
   ChevronRight,
   Download,
@@ -15,7 +16,6 @@ import {
   Sparkles,
   Square,
   Trash2,
-  TriangleAlert,
   Wrench,
   X,
 } from "lucide-react";
@@ -43,9 +43,9 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
-const ACTIVE = new Set<AgentTask["status"]>(["pending", "running", "waiting_approval"]);
+const ACTIVE = new Set(["pending", "running", "waiting_approval"]);
 
-const TASK_LABEL: Record<AgentTask["status"], string> = {
+const STATUS_LABEL: Record<string, string> = {
   pending: "Starting…",
   running: "Working…",
   waiting_approval: "Waiting for your approval",
@@ -65,7 +65,19 @@ const TOOL_LABEL: Record<string, string> = {
   update_lead_status: "Changed a lead's status",
 };
 
-const APPROVAL_PHRASE: Record<string, string> = {
+// The project has no typography plugin, so agent replies (Markdown with
+// lists and tables) are styled here.
+const MARKDOWN = [
+  "max-w-none text-sm leading-relaxed",
+  "[&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5",
+  "[&_h1]:mt-3 [&_h1]:font-semibold [&_h2]:mt-3 [&_h2]:font-semibold [&_h3]:mt-3 [&_h3]:font-medium",
+  "[&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
+  "[&_table]:my-2 [&_table]:block [&_table]:overflow-x-auto [&_table]:text-xs",
+  "[&_th]:border [&_th]:bg-muted [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top",
+].join(" ");
+
+// Phrased as what the agent is asking permission to do.
+const ACTION_LABEL: Record<string, string> = {
   update_lead_status: "change a lead's status",
 };
 
@@ -74,9 +86,12 @@ function errorText(cause: unknown, fallback: string): string {
 }
 
 /**
- * AI Agent — describe a task in plain words; the agent plans it, uses its
- * tools (web, spreadsheets, backlinks, leads) and asks before changing
- * anything. Runs on the backend; this screen polls the chat while it works.
+ * AI agent chat.
+ *
+ * Describe a task in your own words; the agent plans it and uses the tools
+ * the backend exposes (web search, pages, sheets, backlinks, leads, CSV
+ * files). Anything that changes a record waits for an Approve click here.
+ * The agent runs server-side, so closing the page does not stop it.
  */
 export function AssistantView() {
   const [status, setStatus] = React.useState<AgentStatus | null>(null);
@@ -84,7 +99,7 @@ export function AssistantView() {
   const [selected, setSelected] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
-  const refresh = React.useCallback(async () => {
+  const loadChats = React.useCallback(async () => {
     try {
       const [s, c] = await Promise.all([getAgentStatus(), listAgentChats()]);
       setStatus(s);
@@ -96,13 +111,13 @@ export function AssistantView() {
   }, []);
 
   React.useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void loadChats();
+  }, [loadChats]);
 
   async function newChat() {
     try {
       const chat = await createAgentChat();
-      setChats((cur) => [chat, ...cur]);
+      setChats((c) => [chat, ...c]);
       setSelected(chat.id);
     } catch (cause) {
       setError(errorText(cause, "Could not start a chat."));
@@ -115,8 +130,8 @@ export function AssistantView() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">AI Agent</h1>
           <p className="text-sm text-muted-foreground">
-            Describe a task in your own words. The agent plans it, uses its
-            tools, and asks before changing anything.
+            Describe a task in your own words. The agent plans it, uses its tools,
+            and asks before changing anything.
           </p>
           {status?.configured ? (
             <p className="mt-1 text-xs text-muted-foreground">
@@ -132,19 +147,12 @@ export function AssistantView() {
       </header>
 
       {status && !status.configured ? (
-        <p
-          role="alert"
-          className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-        >
-          The agent is not configured: set OLLAMA_MODEL (or GROQ_API_KEY) in the
-          backend environment.
+        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          The agent is not configured: set GROQ_API_KEY in the backend environment.
         </p>
       ) : null}
       {error ? (
-        <p
-          role="alert"
-          className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-        >
+        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
           {error}
         </p>
       ) : null}
@@ -174,10 +182,10 @@ export function AssistantView() {
               key={selected}
               chatId={selected}
               status={status}
-              onChanged={refresh}
+              onChanged={loadChats}
               onDeleted={() => {
                 setSelected(null);
-                void refresh();
+                void loadChats();
               }}
             />
           ) : (
@@ -202,12 +210,12 @@ function EmptyState({ status, onStart }: { status: AgentStatus | null; onStart: 
         </p>
       </div>
       <Button onClick={onStart}>New chat</Button>
-      {status ? <Capabilities status={status} /> : null}
+      {status ? <ToolList status={status} /> : null}
     </div>
   );
 }
 
-function Capabilities({ status }: { status: AgentStatus }) {
+function ToolList({ status }: { status: AgentStatus }) {
   return (
     <div className="max-w-lg text-left text-xs text-muted-foreground">
       <p className="mb-1 font-medium text-foreground">What it can do</p>
@@ -238,8 +246,8 @@ function ChatPanel({
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [showInstructions, setShowInstructions] = React.useState(false);
-  const bottom = React.useRef<HTMLDivElement>(null);
+  const [showSettings, setShowSettings] = React.useState(false);
+  const bottomRef = React.useRef<HTMLDivElement>(null);
 
   const load = React.useCallback(async () => {
     try {
@@ -254,12 +262,11 @@ function ChatPanel({
   }, [load]);
 
   const tasks = detail?.tasks ?? [];
-  const latest = tasks[tasks.length - 1];
+  const latest: AgentTask | undefined = tasks[tasks.length - 1];
   const active = latest && ACTIVE.has(latest.status) ? latest : undefined;
-  // Poll while the agent works; waiting for approval needs no polling, the
-  // next change comes from this screen.
-  const polling = !!active && active.status !== "waiting_approval";
+  const polling = active && active.status !== "waiting_approval";
 
+  // Poll while the agent works; it runs on the server, not in this request.
   React.useEffect(() => {
     if (!polling) return;
     const timer = window.setInterval(() => void load(), 1500);
@@ -268,7 +275,7 @@ function ChatPanel({
 
   const messageCount = detail?.messages.length ?? 0;
   React.useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
+    bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messageCount, active?.status]);
 
   async function send() {
@@ -288,14 +295,14 @@ function ChatPanel({
     }
   }
 
-  async function act(fn: () => Promise<unknown>, failure: string) {
+  async function act(fn: () => Promise<unknown>, fallback: string) {
     setBusy(true);
     setError(null);
     try {
       await fn();
       await load();
     } catch (cause) {
-      setError(errorText(cause, failure));
+      setError(errorText(cause, fallback));
     } finally {
       setBusy(false);
     }
@@ -309,17 +316,17 @@ function ChatPanel({
     );
   }
 
+  // Tool results keyed by the call that produced them, to render each call
+  // and its outcome as one activity row.
   const results = new Map<string, AgentMessage>();
-  for (const m of detail.messages) {
-    if (m.role === "tool" && m.toolCallId) results.set(m.toolCallId, m);
-  }
+  for (const m of detail.messages) if (m.role === "tool" && m.toolCallId) results.set(m.toolCallId, m);
 
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
         <h2 className="min-w-0 truncate font-medium">{detail.chat.title}</h2>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={() => setShowInstructions((v) => !v)}>
+          <Button variant="ghost" size="sm" onClick={() => setShowSettings((s) => !s)}>
             <Settings2 className="mr-1.5 h-4 w-4" /> Instructions
           </Button>
           <Button
@@ -347,12 +354,12 @@ function ChatPanel({
         </div>
       </div>
 
-      {showInstructions ? (
+      {showSettings ? (
         <InstructionsEditor
           chatId={chatId}
           initial={detail.chat.instructions}
           onSaved={() => {
-            setShowInstructions(false);
+            setShowSettings(false);
             void load();
           }}
         />
@@ -362,68 +369,62 @@ function ChatPanel({
         {detail.messages.length === 0 ? (
           <div className="space-y-3 text-sm text-muted-foreground">
             <p>Tell the agent what you need. It will ask if something is unclear.</p>
-            {status ? <Capabilities status={status} /> : null}
+            {status ? <ToolList status={status} /> : null}
           </div>
         ) : null}
 
-        {detail.messages.map((m) =>
-          m.role === "user" ? (
-            <div key={m.id} className="flex justify-end">
-              <div className="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
-                {m.content}
-              </div>
-            </div>
-          ) : m.role === "assistant" ? (
-            <div key={m.id} className="space-y-2">
-              {m.content ? (
-                <div
-                  className={`max-w-none text-sm leading-relaxed [&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_h1]:mt-3 [&_h1]:font-semibold [&_h2]:mt-3 [&_h2]:font-semibold [&_h3]:mt-3 [&_h3]:font-medium [&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_table]:my-2 [&_table]:block [&_table]:overflow-x-auto [&_table]:text-xs [&_th]:border [&_th]:bg-muted [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top ${
-                    m.status === "failed" || m.status === "cancelled" ? "text-destructive" : ""
-                  }`}
-                >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+        {detail.messages.map((m) => {
+          if (m.role === "user") {
+            return (
+              <div key={m.id} className="flex justify-end">
+                <div className="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
+                  {m.content}
                 </div>
-              ) : null}
-              {(m.toolCalls ?? []).map((call) => (
-                <ToolCallCard
-                  key={call.id}
-                  name={call.function.name}
-                  args={call.function.arguments}
-                  result={results.get(call.id)}
-                  awaiting={
-                    active?.status === "waiting_approval" &&
-                    active.pendingAction?.toolCallId === call.id
-                  }
-                  stopped={!results.has(call.id) && !active}
-                />
-              ))}
-            </div>
-          ) : null,
-        )}
+              </div>
+            );
+          }
+          if (m.role === "assistant") {
+            return (
+              <div key={m.id} className="space-y-2">
+                {m.content ? (
+                  <div
+                    className={`${MARKDOWN} ${
+                      m.status === "failed" || m.status === "cancelled" ? "text-destructive" : ""
+                    }`}
+                  >
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                  </div>
+                ) : null}
+                {(m.toolCalls ?? []).map((call) => (
+                  <ToolRow
+                    key={call.id}
+                    name={call.function.name}
+                    args={call.function.arguments}
+                    result={results.get(call.id)}
+                    awaiting={active?.status === "waiting_approval" && active.pendingAction?.name === call.function.name && !results.has(call.id)}
+                    stopped={!results.has(call.id) && !active}
+                  />
+                ))}
+              </div>
+            );
+          }
+          return null;
+        })}
 
         {active?.status === "waiting_approval" && active.pendingAction ? (
           <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
             <p className="flex items-center gap-2 text-sm font-medium">
-              <TriangleAlert className="h-4 w-4 text-amber-600" /> The agent wants to{" "}
-              {APPROVAL_PHRASE[active.pendingAction.name] ?? active.pendingAction.name}. Allow it?
+              <AlertTriangle className="h-4 w-4 text-amber-600" /> The agent wants to{" "}
+              {ACTION_LABEL[active.pendingAction.name] ?? active.pendingAction.name}. Allow it?
             </p>
             <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">
               {JSON.stringify(active.pendingAction.arguments, null, 2)}
             </pre>
             <div className="flex gap-2">
-              <Button
-                size="sm"
-                disabled={busy}
-                onClick={() => act(() => decideAgentTask(active.id, true), "Could not approve.")}
-              >
+              <Button size="sm" disabled={busy} onClick={() => act(() => decideAgentTask(active.id, true), "Could not approve.")}>
                 <Check className="mr-1.5 h-4 w-4" /> Approve
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => act(() => decideAgentTask(active.id, false), "Could not decline.")}
-              >
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => act(() => decideAgentTask(active.id, false), "Could not decline.")}>
                 <X className="mr-1.5 h-4 w-4" /> Decline
               </Button>
             </div>
@@ -441,33 +442,23 @@ function ChatPanel({
             ))}
           </div>
         ) : null}
-        <div ref={bottom} />
+
+        <div ref={bottomRef} />
       </div>
 
-      {error ? (
-        <p role="alert" className="px-4 pb-2 text-sm text-destructive">
-          {error}
-        </p>
-      ) : null}
+      {error ? <p role="alert" className="px-4 pb-2 text-sm text-destructive">{error}</p> : null}
 
       <div className="border-t p-3">
         {latest ? (
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5">
               {polling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              {TASK_LABEL[latest.status] ?? latest.status}
-              {latest.toolCalls
-                ? ` · ${latest.toolCalls} tool call${latest.toolCalls === 1 ? "" : "s"}`
-                : ""}
+              {STATUS_LABEL[latest.status] ?? latest.status}
+              {latest.toolCalls ? ` · ${latest.toolCalls} tool call${latest.toolCalls === 1 ? "" : "s"}` : ""}
               {latest.tokensUsed ? ` · ${latest.tokensUsed.toLocaleString()} tokens` : ""}
             </span>
             {active ? (
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={busy}
-                onClick={() => act(() => cancelAgentTask(active.id), "Could not stop.")}
-              >
+              <Button variant="outline" size="sm" disabled={busy} onClick={() => act(() => cancelAgentTask(active.id), "Could not stop.")}>
                 <Square className="mr-1.5 h-3.5 w-3.5" /> Stop
               </Button>
             ) : null}
@@ -490,9 +481,7 @@ function ChatPanel({
               }
             }}
             rows={2}
-            placeholder={
-              active ? "The agent is working…" : "Describe the task. Shift+Enter for a new line."
-            }
+            placeholder={active ? "The agent is working…" : "Describe the task. Shift+Enter for a new line."}
             disabled={busy || !!active || (status !== null && !status.configured)}
             className="min-h-[44px] resize-none"
           />
@@ -505,7 +494,7 @@ function ChatPanel({
   );
 }
 
-function ToolCallCard({
+function ToolRow({
   name,
   args,
   result,
@@ -513,7 +502,7 @@ function ToolCallCard({
   stopped = false,
 }: {
   name: string;
-  args: Record<string, unknown> | string;
+  args: string | Record<string, unknown>;
   result?: AgentMessage;
   awaiting?: boolean;
   stopped?: boolean;
@@ -527,34 +516,32 @@ function ToolCallCard({
         ? "text-muted-foreground"
         : "text-destructive";
   const argText = typeof args === "string" ? args : JSON.stringify(args);
-  const label =
-    state === "running"
-      ? "running…"
-      : state === "cached"
-        ? "reused"
-        : state === "awaiting"
-          ? "awaiting approval"
-          : state;
 
   return (
     <div className="rounded-md border bg-muted/30 text-xs">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
       >
         <ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`} />
         <Wrench className="h-3.5 w-3.5" />
         <span className="font-medium">{TOOL_LABEL[name] ?? name}</span>
-        <span className={`ml-auto ${tone}`}>{label}</span>
+        <span className={`ml-auto ${tone}`}>
+          {state === "running"
+            ? "running…"
+            : state === "cached"
+              ? "reused"
+              : state === "awaiting"
+                ? "awaiting approval"
+                : state}
+        </span>
       </button>
       {open ? (
         <div className="space-y-2 border-t px-2.5 py-2">
           <pre className="overflow-x-auto whitespace-pre-wrap break-all text-muted-foreground">{argText}</pre>
           {result ? (
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all">
-              {result.content.slice(0, 4000)}
-            </pre>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all">{result.content.slice(0, 4000)}</pre>
           ) : null}
         </div>
       ) : null}
@@ -573,7 +560,6 @@ function InstructionsEditor({
 }) {
   const [value, setValue] = React.useState(initial);
   const [saving, setSaving] = React.useState(false);
-
   return (
     <div className="space-y-2 border-b bg-muted/20 p-4">
       <Label htmlFor={`instructions-${chatId}`}>Instructions for this chat</Label>
@@ -585,8 +571,8 @@ function InstructionsEditor({
         placeholder="e.g. Always answer in a table. Our target domain is all-bettors.com. Keep reports under 200 rows."
       />
       <p className="text-xs text-muted-foreground">
-        Applied to every message in this chat: goals, output format,
-        constraints. They cannot override the platform&apos;s safety rules.
+        Applied to every message in this chat: goals, output format, constraints.
+        They cannot override the platform&apos;s safety rules.
       </p>
       <Button
         size="sm"

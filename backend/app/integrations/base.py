@@ -53,6 +53,10 @@ class ConnectionStatus:
     detail: str | None = None
 
 
+class ManualReplyOnly(RuntimeError):
+    """This platform is read-only here; a person posts the reply."""
+
+
 class PlatformConnector(abc.ABC):
     """Base for every platform integration."""
 

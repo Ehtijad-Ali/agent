@@ -221,6 +221,55 @@ class DiscordConnector(PlatformConnector):
                 content_visible = False
         return readable, blocked, content_visible
 
+    async def application_id(self) -> str:
+        """The bot's application id, which the invite link is built from."""
+        app = await self._get("/oauth2/applications/@me")
+        return str(app["id"])
+
+    @staticmethod
+    def invite_url(application_id: str) -> str:
+        """OAuth2 link a server admin opens to add the bot to their server.
+
+        Requests only what ingestion and approved replies need: View Channels
+        (1024), Send Messages (2048) and Read Message History (65536). The bot
+        cannot add itself anywhere -- an admin of each server has to open this.
+        """
+        permissions = 1024 | 2048 | 65536
+        return (
+            "https://discord.com/oauth2/authorize"
+            f"?client_id={application_id}&scope=bot&permissions={permissions}"
+        )
+
+    async def server_overview(self, max_channels: int = 50) -> list[dict[str, Any]]:
+        """Every server the bot is in, with each text channel marked readable
+        or blocked. Probing is the only reliable test: the channel list shows
+        channels the role cannot actually read."""
+        servers: list[dict[str, Any]] = []
+        for guild in await self._get("/users/@me/guilds"):
+            entry: dict[str, Any] = {
+                "id": guild["id"],
+                "name": guild["name"],
+                "channels": [],
+                "error": None,
+            }
+            try:
+                channels = await self._get(f"/guilds/{guild['id']}/channels")
+            except DiscordError as exc:
+                entry["error"] = str(exc)
+                servers.append(entry)
+                continue
+            for channel in [c for c in channels if c.get("type") == 0][:max_channels]:
+                try:
+                    await self._get(f"/channels/{channel['id']}/messages", limit=1)
+                    readable = True
+                except DiscordError:
+                    readable = False
+                entry["channels"].append(
+                    {"id": channel["id"], "name": channel["name"], "readable": readable}
+                )
+            servers.append(entry)
+        return servers
+
     async def list_sources(self) -> list[dict[str, Any]]:
         """Guilds and the text channels the bot can actually read."""
         guilds = await self._get("/users/@me/guilds")

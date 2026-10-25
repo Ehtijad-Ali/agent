@@ -1,45 +1,43 @@
-r"""Sign the discovery Telegram account in, once, on the server.
+r"""Sign in the dedicated Telegram account once and print its session string.
 
-    .venv\Scripts\python.exe -m pip install telethon
-    .venv\Scripts\python.exe scripts\telegram_login.py
+Run on the server (Telegram may be blocked on some home networks):
 
-Needs TELEGRAM_API_ID and TELEGRAM_API_HASH in backend/.env (from
-my.telegram.org -> API development tools). Telegram sends a login code to the
-account; type it here. The resulting session file sits next to the backend and
-is gitignored -- treat it like a password, because it is one.
+    cd /opt/signal/app/backend
+    .venv/bin/python scripts/telegram_login.py
+
+You need the account's phone number and the API id/hash from
+https://my.telegram.org -> API development tools. Telegram sends a login code
+to the account's Telegram app; type it here (and the 2FA password if set).
+
+Put the printed string in backend/.env as TELEGRAM_SESSION, together with
+TELEGRAM_API_ID and TELEGRAM_API_HASH, then restart the API. The string is a
+login: keep it secret, never commit it.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
+import getpass
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app.core.config import get_settings  # noqa: E402
-from app.integrations.telegram_account import BACKEND_ROOT, telethon_available  # noqa: E402
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 
 async def main() -> None:
-    settings = get_settings()
-    if not (settings.telegram_api_id and settings.telegram_api_hash):
-        print("[X] Set TELEGRAM_API_ID and TELEGRAM_API_HASH in backend/.env first.")
-        sys.exit(1)
-    if not telethon_available():
-        print("[X] Telethon is not installed: .venv\\Scripts\\python.exe -m pip install telethon")
-        sys.exit(1)
+    api_id = int(input("API id: ").strip())
+    api_hash = input("API hash: ").strip()
+    phone = input("Phone number (with country code, e.g. +44...): ").strip()
 
-    from telethon import TelegramClient
-
-    client = TelegramClient(
-        str(BACKEND_ROOT / settings.telegram_session),
-        int(settings.telegram_api_id),
-        settings.telegram_api_hash,
+    client = TelegramClient(StringSession(), api_id, api_hash)
+    await client.start(
+        phone=phone,
+        code_callback=lambda: input("Login code from Telegram: ").strip(),
+        password=lambda: getpass.getpass("Two-step verification password (blank if none): "),
     )
-    await client.start()  # prompts for phone number, code and 2FA password
     me = await client.get_me()
-    print(f"[ok] Signed in as @{me.username or me.id}. Restart the backend to use it.")
+    print(f"\nSigned in as {me.first_name} (@{me.username}).")
+    print("\nTELEGRAM_SESSION=" + client.session.save())
+    print("\nAdd that line, TELEGRAM_API_ID and TELEGRAM_API_HASH to backend/.env, then restart the API.")
     await client.disconnect()
 
 

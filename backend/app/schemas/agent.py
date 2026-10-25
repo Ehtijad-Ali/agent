@@ -35,22 +35,38 @@ class ContentRules(CamelModel):
     )
 
 
-def _default_domain() -> str:
-    from urllib.parse import urlparse
-
-    from app.core.config import get_settings
-
-    host = urlparse(get_settings().product_url).hostname or "all-bettors.com"
-    return host.removeprefix("www.")
-
-
-class BacklinkRules(CamelModel):
-    """Rules for an agent that audits backlinks listed in a Google Sheet."""
+class BacklinkAuditRules(CamelModel):
+    """Rules for an agent that checks pages for a dofollow link to us."""
 
     sheet_url: str = ""
     url_column: str = Field(default="A", min_length=1, max_length=3)
-    target_domain: str = Field(default_factory=_default_domain)
+    target_domain: str = "all-bettors.com"
     max_urls: int = Field(default=10000, ge=1, le=10000)
+
+
+class BacklinkCheckOut(CamelModel):
+    row: int
+    page_url: str
+    result: str
+    rel: str
+    link_href: str
+    anchor_text: str
+    http_status: int | None = None
+    detail: str
+    checked_at: datetime
+
+
+class BacklinkAuditOut(CamelModel):
+    """Where the last audit stands and what it found."""
+
+    status: str  # idle | running | completed | failed
+    total: int = 0
+    done: int = 0
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    counts: dict[str, int] = Field(default_factory=dict)
+    items: list[BacklinkCheckOut] = Field(default_factory=list)
 
 
 class AgentCreate(CamelModel):
@@ -127,28 +143,3 @@ class RefinementIndex(CamelModel):
     click_through_rate: float
     precision: float
     notes: list[str] = Field(default_factory=list)
-
-
-class BacklinkCheckOut(CamelModel):
-    row: int
-    page_url: str
-    result: str
-    rel: str
-    link_href: str
-    anchor_text: str
-    http_status: int | None = None
-    detail: str
-    checked_at: datetime
-
-
-class BacklinkAuditOut(CamelModel):
-    """Where the last audit stands and what it found."""
-
-    status: str
-    total: int = 0
-    done: int = 0
-    error: str | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    counts: dict[str, int] = Field(default_factory=dict)
-    items: list[BacklinkCheckOut] = Field(default_factory=list)

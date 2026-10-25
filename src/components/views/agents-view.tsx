@@ -8,7 +8,6 @@ import {
   type AgentOutput,
   type AgentType,
   type BacklinkAudit,
-  type BacklinkResult,
   ApiError,
   auditCsvUrl,
   createAgent,
@@ -178,12 +177,11 @@ function CreateAgent({
     setBusy(true);
     setError(null);
     try {
-      // Rules are left at their defaults here, except the sheet a backlink
-      // audit reads -- without it the new agent could not do anything.
-      const rules =
-        agentType === "backlink_audit" && sheetUrl.trim()
-          ? { sheetUrl: sheetUrl.trim() }
-          : undefined;
+      // Rules are otherwise left at their defaults; they are edited on the
+      // agent itself, where the type-specific fields are known.
+      const rules = agentType === "backlink_audit" && sheetUrl.trim()
+        ? { sheetUrl: sheetUrl.trim() }
+        : undefined;
       const agent = await createAgent({ name, agentType, description, enabled: true, rules });
       onCreated(agent);
     } catch (cause) {
@@ -242,7 +240,7 @@ function CreateAgent({
           />
           <p className="text-xs text-muted-foreground">
             Page URLs are read from column A. The sheet must be shared as
-            “Anyone with the link can view”.
+            &ldquo;Anyone with the link can view&rdquo;.
           </p>
         </div>
       ) : null}
@@ -409,30 +407,25 @@ function AgentDetail({ agent, onChanged }: { agent: Agent; onChanged: () => void
   );
 }
 
-const RESULT_LABEL: Record<BacklinkResult, string> = {
+const RESULT_LABEL: Record<string, string> = {
   dofollow: "Dofollow",
   nofollow: "Nofollow",
   not_found: "No link",
   error: "Error",
 };
 
-const RESULT_CLASS: Record<BacklinkResult, string> = {
+const RESULT_STYLE: Record<string, string> = {
   dofollow: "bg-primary/10 text-primary",
   nofollow: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
   not_found: "bg-muted text-muted-foreground",
   error: "bg-destructive/10 text-destructive",
 };
 
-/**
- * Backlink audit: read page URLs from a Google Sheet, check each page for a
- * link to our domain and whether it is dofollow. Runs on the server; this
- * polls while it does, and the CSV lines up with the sheet for pasting back.
- */
 function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () => void }) {
   const savedSheet = String(agent.rules.sheetUrl ?? "");
-  const [sheet, setSheet] = React.useState(savedSheet);
+  const [sheetUrl, setSheetUrl] = React.useState(savedSheet);
   const [audit, setAudit] = React.useState<BacklinkAudit | null>(null);
-  const [filter, setFilter] = React.useState<"all" | BacklinkResult>("all");
+  const [filter, setFilter] = React.useState<string>("all");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -448,8 +441,8 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
     void load();
   }, [load]);
 
+  // Poll while a run is in progress; it takes minutes for a large sheet.
   const running = audit?.status === "running";
-
   React.useEffect(() => {
     if (!running) return;
     const timer = window.setInterval(() => void load(), 3000);
@@ -460,7 +453,7 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
     setBusy(true);
     setError(null);
     try {
-      await updateAgent(agent.id, { rules: { ...agent.rules, sheetUrl: sheet.trim() } });
+      await updateAgent(agent.id, { rules: { ...agent.rules, sheetUrl: sheetUrl.trim() } });
       onChanged();
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "Could not save the sheet link.");
@@ -481,8 +474,7 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
     }
   }
 
-  const rows = (audit?.items ?? []).filter((r) => filter === "all" || r.result === filter);
-  const dirty = sheet.trim() !== savedSheet;
+  const items = (audit?.items ?? []).filter((i) => filter === "all" || i.result === filter);
 
   return (
     <div className="space-y-4">
@@ -491,13 +483,13 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
         <div className="flex flex-wrap gap-2">
           <Input
             id={`sheet-${agent.id}`}
-            value={sheet}
-            onChange={(e) => setSheet(e.target.value)}
+            value={sheetUrl}
+            onChange={(e) => setSheetUrl(e.target.value)}
             placeholder="https://docs.google.com/spreadsheets/d/…/edit"
             className="min-w-[240px] flex-1"
             disabled={busy || running}
           />
-          {dirty ? (
+          {sheetUrl.trim() !== savedSheet ? (
             <Button variant="secondary" onClick={saveSheet} disabled={busy}>
               Save
             </Button>
@@ -506,12 +498,13 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
         <p className="text-xs text-muted-foreground">
           Checks every URL in column A for a link to{" "}
           {String(agent.rules.targetDomain ?? "all-bettors.com")} and whether it is
-          dofollow. Share the sheet as “Anyone with the link can view”.
+          dofollow. Share the sheet as &ldquo;Anyone with the link can view&rdquo;.
         </p>
+
         <div className="flex flex-wrap items-center gap-3 pt-1">
           <Button
             onClick={run}
-            disabled={busy || running || !agent.enabled || !savedSheet || dirty}
+            disabled={busy || running || !agent.enabled || !savedSheet || sheetUrl.trim() !== savedSheet}
           >
             {running ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -547,8 +540,8 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
       {audit && audit.items.length > 0 ? (
         <div className="space-y-3">
           <div className="flex flex-wrap gap-2">
-            {(["all", "dofollow", "nofollow", "not_found", "error"] as const).map((key) => {
-              const count = key === "all" ? audit.items.length : (audit.counts[key] ?? 0);
+            {["all", "dofollow", "nofollow", "not_found", "error"].map((key) => {
+              const count = key === "all" ? audit.items.length : audit.counts[key as keyof typeof audit.counts] ?? 0;
               return (
                 <button
                   key={key}
@@ -562,6 +555,7 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
               );
             })}
           </div>
+
           <div className="max-h-[480px] overflow-auto rounded-md border">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-card text-left text-xs text-muted-foreground">
@@ -573,28 +567,28 @@ function BacklinkAuditPanel({ agent, onChanged }: { agent: Agent; onChanged: () 
                 </tr>
               </thead>
               <tbody>
-                {rows.slice(0, 500).map((r) => (
-                  <tr key={r.row} className="border-t align-top">
-                    <td className="p-2 tabular-nums text-muted-foreground">{r.row}</td>
+                {items.slice(0, 500).map((i) => (
+                  <tr key={i.row} className="border-t align-top">
+                    <td className="p-2 tabular-nums text-muted-foreground">{i.row}</td>
                     <td className="max-w-[320px] p-2">
-                      <a href={r.pageUrl} target="_blank" rel="noreferrer" className="block truncate underline">
-                        {r.pageUrl}
+                      <a href={i.pageUrl} target="_blank" rel="noreferrer" className="block truncate underline">
+                        {i.pageUrl}
                       </a>
                     </td>
                     <td className="p-2">
-                      <span className={`whitespace-nowrap rounded px-2 py-0.5 text-xs ${RESULT_CLASS[r.result]}`}>
-                        {RESULT_LABEL[r.result]}
+                      <span className={`whitespace-nowrap rounded px-2 py-0.5 text-xs ${RESULT_STYLE[i.result]}`}>
+                        {RESULT_LABEL[i.result]}
                       </span>
                     </td>
-                    <td className="hidden p-2 text-xs text-muted-foreground md:table-cell">{r.detail}</td>
+                    <td className="hidden p-2 text-xs text-muted-foreground md:table-cell">{i.detail}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          {rows.length > 500 ? (
+          {items.length > 500 ? (
             <p className="text-xs text-muted-foreground">
-              Showing the first 500 of {rows.length}. Download the CSV for all of them.
+              Showing the first 500 of {items.length}. Download the CSV for all of them.
             </p>
           ) : null}
         </div>

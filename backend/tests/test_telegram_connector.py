@@ -250,29 +250,3 @@ class TestRateLimitRetry:
             asyncio.run(connector._call("getMe"))
         assert len(calls) == 1
         assert slept == []
-
-
-class TestHealthCheck:
-    def _run(self, connector, monkeypatch, me):
-        async def fake_call(method, **params):
-            return me
-
-        monkeypatch.setattr(connector, "_call", fake_call)
-        return asyncio.run(connector.health_check())
-
-    def test_flags_group_joining_disabled(self, connector, monkeypatch):
-        status = self._run(
-            connector,
-            monkeypatch,
-            {"username": "bot", "can_join_groups": False, "can_read_all_group_messages": True},
-        )
-        assert status.status == "connected"
-        assert "/setjoingroups" in status.detail
-
-    def test_clean_when_fully_configured(self, connector, monkeypatch):
-        status = self._run(
-            connector,
-            monkeypatch,
-            {"username": "bot", "can_join_groups": True, "can_read_all_group_messages": True},
-        )
-        assert status.detail == "Connected as @bot."

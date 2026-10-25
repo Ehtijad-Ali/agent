@@ -1,12 +1,19 @@
-"""Backlink checking: does a page link to us, and is that link dofollow?
+"""Backlink audit agents: is each page's link to us dofollow?
 
-A link counts as *nofollow* when its ``rel`` carries nofollow, ugc or
-sponsored -- all three tell search engines not to pass ranking credit. When a
-page links to the domain more than once, one dofollow link is enough for the
-page to count as dofollow.
+The job, as the operator described it: take the URLs in column A of a Google
+Sheet, open each page, find the link to the target domain, and record whether
+it is dofollow. That is deterministic -- an HTML attribute check -- so it is
+done with a parser, not a language model. A model would be slower, cost money
+per page and occasionally be wrong about something a parser cannot get wrong.
 
-Shared by the ``backlink_audit`` agent (a whole sheet, in the background) and
-the AI Agent's ``check_backlinks`` tool (a handful of URLs, inline).
+Results are stored per agent and offered as a CSV whose second column lines up
+with the sheet, so it can be pasted straight into column B. Writing to the
+sheet directly needs Google credentials with edit access, which the platform
+does not hold.
+
+Every URL here comes from a user-supplied sheet and is fetched by the server,
+so each one is checked before the request is made: http(s) only, and never an
+address on the server's own network (spec §41).
 """
 
 from __future__ import annotations
@@ -14,27 +21,37 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import ipaddress
 import logging
+import re
+import socket
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from urllib.parse import urlparse
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
 
-from sqlalchemy import delete, select
-
-from app.db.session import session_scope
-from app.models import ActivityEntry, Agent, BacklinkAudit, BacklinkCheck
-from app.services import web_service
-from app.services.web_service import FetchError
-from app.utils.background import spawn
+import httpx
 
 logger = logging.getLogger("signal.backlinks")
 
-NOFOLLOW_RELS = {"nofollow", "ugc", "sponsored"}
-CONCURRENCY = 6
+# Pages fetched at once. Enough to finish a few hundred rows in a minute or
+# two without looking like an attack on any one host.
+CONCURRENCY = 8
+FETCH_TIMEOUT = 20.0
+# Larger pages are cut off here; a link in the first 3 MB is found, and a
+# runaway response cannot exhaust memory.
+MAX_BYTES = 3_000_000
+USER_AGENT = (
+    "Mozilla/5.0 (compatible; SignalBacklinkAudit/1.0; "
+    "+https://signal.joinallbettors.com)"
+)
 
-# Audits running in this process, so a second "Run audit" is refused instead
-# of racing the first over the same rows.
-_running: dict = {}
+_SHEET_ID = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
+_GID = re.compile(r"[#&?]gid=(\d+)")
+_NOFOLLOW_RELS = {"nofollow", "sponsored", "ugc"}
+
+
+class BacklinkError(RuntimeError):
+    """The audit cannot start, and why -- shown to the operator verbatim."""
 
 
 @dataclass(slots=True)
@@ -49,264 +66,233 @@ class CheckResult:
     detail: str = ""
 
 
-def normalise_domain(domain: str) -> str:
-    value = domain.strip().lower()
-    if "://" in value:
-        value = urlparse(value).hostname or value
-    value = value.split("/")[0]
-    return value.removeprefix("www.")
+# -- the sheet ---------------------------------------------------------------
 
 
-def _points_to(href: str, domain: str) -> bool:
-    host = (urlparse(href).hostname or "").lower().removeprefix("www.")
-    return bool(host) and (host == domain or host.endswith("." + domain))
+def sheet_csv_url(sheet_url: str) -> str:
+    """Turn a Google Sheets link into its CSV export URL.
+
+    Works for any sheet shared as "anyone with the link can view". The tab is
+    taken from gid= in the link, so pasting a link to the right tab is enough.
+    """
+    match = _SHEET_ID.search(sheet_url or "")
+    if not match:
+        raise BacklinkError(
+            "That is not a Google Sheets link. Paste the link from the browser "
+            "address bar, e.g. https://docs.google.com/spreadsheets/d/…/edit"
+        )
+    url = f"https://docs.google.com/spreadsheets/d/{match.group(1)}/export?format=csv"
+    gid = _GID.search(sheet_url)
+    if gid:
+        url += f"&gid={gid.group(1)}"
+    return url
 
 
-def _looks_like_url(value: str) -> bool:
-    value = value.strip()
-    if not value or " " in value:
+def column_index(letter: str) -> int:
+    """'A' -> 0, 'B' -> 1, 'AA' -> 26."""
+    letter = (letter or "A").strip().upper()
+    if not letter.isalpha():
+        raise BacklinkError(f"Column must be a letter such as A, not {letter!r}.")
+    index = 0
+    for ch in letter:
+        index = index * 26 + (ord(ch) - ord("A") + 1)
+    return index - 1
+
+
+def urls_from_csv(text: str, column: str = "A") -> list[tuple[int, str]]:
+    """(sheet row, url) for every cell in the column that looks like a URL.
+
+    Header rows and blank cells are skipped by the same test: a cell that does
+    not start with http is not a page to check.
+    """
+    col = column_index(column)
+    out: list[tuple[int, str]] = []
+    for row_number, row in enumerate(csv.reader(io.StringIO(text)), start=1):
+        if col < len(row):
+            cell = row[col].strip()
+            if cell.lower().startswith(("http://", "https://")):
+                out.append((row_number, cell))
+    return out
+
+
+async def read_sheet(sheet_url: str, column: str = "A") -> list[tuple[int, str]]:
+    export = sheet_csv_url(sheet_url)
+    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+        try:
+            response = await client.get(export)
+        except httpx.HTTPError as exc:
+            raise BacklinkError(f"Could not reach Google Sheets: {exc}") from exc
+
+    content_type = response.headers.get("content-type", "")
+    # A private sheet answers with a sign-in page (HTML), not an error code.
+    if response.status_code != 200 or "text/csv" not in content_type:
+        raise BacklinkError(
+            "The sheet could not be read. In Google Sheets click Share -> "
+            "General access -> 'Anyone with the link' (Viewer), then try again."
+        )
+    urls = urls_from_csv(response.text, column)
+    if not urls:
+        raise BacklinkError(f"No URLs found in column {column.upper()} of the sheet.")
+    return urls
+
+
+# -- one page ----------------------------------------------------------------
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    domain = domain.lower().strip().removeprefix("www.")
+    return host == domain or host.endswith("." + domain)
+
+
+class _LinkFinder(HTMLParser):
+    """Collects <a> tags pointing at the target domain, plus meta robots."""
+
+    def __init__(self, base_url: str, domain: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.domain = domain
+        self.links: list[dict[str, str]] = []
+        self.meta_nofollow = False
+        self._open: dict[str, str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "meta" and a.get("name", "").lower() in ("robots", "googlebot"):
+            if "nofollow" in a.get("content", "").lower():
+                self.meta_nofollow = True
+        elif tag == "base" and a.get("href"):
+            self.base_url = urljoin(self.base_url, a["href"])
+        elif tag == "a" and a.get("href"):
+            href = urljoin(self.base_url, a["href"].strip())
+            if _host_matches(urlparse(href).hostname or "", self.domain):
+                self._open = {"href": href, "rel": a.get("rel", "").strip(), "text": ""}
+                self.links.append(self._open)
+
+    def handle_data(self, data: str) -> None:
+        if self._open is not None:
+            self._open["text"] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a":
+            self._open = None
+
+
+def classify(html: str, page_url: str, domain: str, robots_header: str = "") -> dict:
+    """Decide dofollow / nofollow / not_found for one page's HTML.
+
+    If the page links to us more than once, one dofollow link is enough for
+    the page to count as dofollow -- that link passes value whatever the
+    others say.
+    """
+    finder = _LinkFinder(page_url, domain)
+    try:
+        finder.feed(html)
+        finder.close()
+    except Exception:  # noqa: BLE001 -- malformed HTML still yields what was parsed
+        pass
+
+    if not finder.links:
+        return {"result": "not_found", "detail": f"No link to {domain} on the page."}
+
+    page_nofollow = finder.meta_nofollow or "nofollow" in robots_header.lower()
+    for link in finder.links:
+        rels = set(link["rel"].lower().split())
+        if not (rels & _NOFOLLOW_RELS) and not page_nofollow:
+            return {
+                "result": "dofollow",
+                "rel": link["rel"],
+                "link_href": link["href"],
+                "anchor_text": " ".join(link["text"].split())[:300],
+                "detail": f"{len(finder.links)} link(s) to {domain} found.",
+            }
+
+    link = finder.links[0]
+    reason = (
+        "page-level robots nofollow"
+        if page_nofollow
+        else f'rel="{link["rel"]}"'
+    )
+    return {
+        "result": "nofollow",
+        "rel": link["rel"],
+        "link_href": link["href"],
+        "anchor_text": " ".join(link["text"].split())[:300],
+        "detail": f"Nofollow: {reason}.",
+    }
+
+
+def _is_public_host(host: str) -> bool:
+    """False for anything that resolves to a private, loopback or reserved
+    address -- the server must not be steered into probing its own network."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
         return False
-    if "://" not in value:
-        value = "https://" + value
-    parsed = urlparse(value)
-    return parsed.scheme in ("http", "https") and "." in (parsed.hostname or "")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global:
+            return False
+    return True
 
 
-async def check_page(row: int, page_url: str, domain: str) -> CheckResult:
-    url = page_url.strip()
-    if not _looks_like_url(url):
-        return CheckResult(row, page_url, "error", detail="Not a URL.")
-    if "://" not in url:
-        url = "https://" + url
+async def check_page(
+    client: httpx.AsyncClient, row: int, url: str, domain: str
+) -> CheckResult:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return CheckResult(row, url, "error", detail="Not an http(s) URL.")
+    if not await asyncio.to_thread(_is_public_host, parsed.hostname):
+        return CheckResult(row, url, "error", detail="Host does not resolve to a public address.")
 
     try:
-        page = await web_service.fetch(url)
-    except FetchError as exc:
-        return CheckResult(row, page_url, "error", detail=str(exc))
+        async with client.stream("GET", url) as response:
+            # Redirects are followed by the client; re-check where we landed.
+            final_host = response.url.host
+            if final_host != parsed.hostname and not await asyncio.to_thread(
+                _is_public_host, final_host
+            ):
+                return CheckResult(row, url, "error", detail="Redirected to a non-public address.")
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) >= MAX_BYTES:
+                    break
+            status = response.status_code
+            robots = response.headers.get("x-robots-tag", "")
+            encoding = response.encoding or "utf-8"
+    except httpx.HTTPError as exc:
+        return CheckResult(row, url, "error", detail=f"Could not load the page: {exc!s}"[:300])
 
-    if page.status >= 400:
-        return CheckResult(
-            row, page_url, "error", http_status=page.status,
-            detail=f"The page returned HTTP {page.status}.",
-        )
+    if status >= 400:
+        return CheckResult(row, url, "error", http_status=status, detail=f"Page returned HTTP {status}.")
 
-    content = web_service.parse_html(page.text, page.url)
-    matches = [link for link in content.links if _points_to(link.href, domain)]
-    if not matches:
-        return CheckResult(
-            row, page_url, "not_found", http_status=page.status,
-            detail=f"No link to {domain} on the page.",
-        )
-
-    def is_follow(link: web_service.Link) -> bool:
-        return not (set(link.rel.split()) & NOFOLLOW_RELS)
-
-    best = next((link for link in matches if is_follow(link)), matches[0])
-    result = "dofollow" if is_follow(best) else "nofollow"
-    extra = f" ({len(matches)} links to {domain})" if len(matches) > 1 else ""
-    detail = (
-        f"Links to {domain} without nofollow{extra}."
-        if result == "dofollow"
-        else f"Link has rel=\"{best.rel}\"{extra}."
-    )
-    return CheckResult(
-        row=row,
-        page_url=page_url,
-        result=result,
-        rel=best.rel,
-        link_href=best.href,
-        anchor_text=best.text,
-        http_status=page.status,
-        detail=detail,
-    )
+    html = bytes(body).decode(encoding, errors="replace")
+    verdict = classify(html, str(response.url), domain, robots)
+    return CheckResult(row=row, page_url=url, http_status=status, **verdict)
 
 
-async def check_many(
-    rows: list[tuple[int, str]], domain: str, on_result=None
-) -> list[CheckResult]:
-    """Check (row, url) pairs with bounded concurrency, preserving order."""
+async def audit(urls: list[tuple[int, str]], domain: str) -> list[CheckResult]:
     semaphore = asyncio.Semaphore(CONCURRENCY)
-    domain = normalise_domain(domain)
+    async with httpx.AsyncClient(
+        timeout=FETCH_TIMEOUT,
+        follow_redirects=True,
+        headers={"User-Agent": USER_AGENT},
+    ) as client:
 
-    async def one(row: int, url: str) -> CheckResult:
-        async with semaphore:
-            try:
-                result = await check_page(row, url, domain)
-            except Exception as exc:  # noqa: BLE001 -- one bad page must not stop the rest
-                logger.exception("Backlink check crashed for %s", url)
-                result = CheckResult(row, url, "error", detail=f"Unexpected error: {type(exc).__name__}")
-        if on_result is not None:
-            on_result(result)
-        return result
+        async def one(row: int, url: str) -> CheckResult:
+            async with semaphore:
+                return await check_page(client, row, url, domain)
 
-    return list(await asyncio.gather(*(one(r, u) for r, u in rows)))
+        return await asyncio.gather(*(one(r, u) for r, u in urls))
 
 
-async def urls_from_sheet(sheet_url: str, column: str = "A", limit: int = 10000) -> list[tuple[int, str]]:
-    """(sheet row number, cell) for every row from the first URL down.
-
-    A leading header row is skipped; blank rows after it are kept, so the
-    results line up with the sheet when pasted back next to it.
-    """
-    table = await web_service.read_spreadsheet(sheet_url)
-    index = web_service.column_index(column)
-    cells = [(n + 1, (r[index] if index < len(r) else "").strip()) for n, r in enumerate(table)]
-
-    first = next((i for i, (_, value) in enumerate(cells) if _looks_like_url(value)), None)
-    if first is None:
-        return []
-    last = max(i for i, (_, value) in enumerate(cells) if _looks_like_url(value))
-    return cells[first : last + 1][:limit]
-
-
-def to_csv(results: list[CheckResult] | list[BacklinkCheck]) -> str:
-    """Sheet order. "Result" is the second column, so the first two columns
-    paste straight over A:B of the original sheet."""
+def results_csv(rows: list) -> str:
+    """CSV in sheet order. Column B matches the operator's sheet layout, so the
+    Result column can be pasted straight into it."""
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["Page URL", "Result", "Rel", "Link", "Anchor text", "HTTP status", "Detail", "Row"])
-    for r in results:
-        writer.writerow(
-            [r.page_url, r.result, r.rel, r.link_href, r.anchor_text, r.http_status or "", r.detail, r.row]
-        )
+    writer.writerow(["URL", "Result", "Rel", "Link found", "Anchor text", "Detail"])
+    for r in sorted(rows, key=lambda r: r.row):
+        writer.writerow([r.page_url, r.result, r.rel, r.link_href, r.anchor_text, r.detail])
     return out.getvalue()
-
-
-# --- the agent's background audit -----------------------------------------
-
-
-def is_running(agent_id: str) -> bool:
-    task = _running.get(agent_id)
-    return task is not None and not task.done()
-
-
-def start_audit(agent: Agent) -> None:
-    """Reset the agent's audit row and kick off the background run."""
-    rules = agent.rules or {}
-    db = session_scope()
-    try:
-        db.execute(delete(BacklinkCheck).where(BacklinkCheck.agent_id == agent.id))
-        audit = db.get(BacklinkAudit, agent.id) or BacklinkAudit(agent_id=agent.id)
-        audit.status = "running"
-        audit.total = 0
-        audit.done = 0
-        audit.error = None
-        audit.started_at = datetime.now(UTC)
-        audit.finished_at = None
-        db.add(audit)
-        db.add(
-            ActivityEntry(actor="you", action="started backlink audit", item=agent.name)
-        )
-        db.commit()
-    finally:
-        db.close()
-
-    _running[agent.id] = spawn(
-        _run(
-            agent.id,
-            agent.name,
-            str(rules.get("sheetUrl", "")),
-            str(rules.get("urlColumn", "A") or "A"),
-            str(rules.get("targetDomain", "")),
-            int(rules.get("maxUrls", 10000) or 10000),
-        )
-    )
-
-
-async def _run(agent_id: str, name: str, sheet_url: str, column: str, domain: str, limit: int) -> None:
-    def update(**fields) -> None:
-        db = session_scope()
-        try:
-            audit = db.get(BacklinkAudit, agent_id)
-            if audit is None:
-                return
-            for key, value in fields.items():
-                setattr(audit, key, value)
-            db.commit()
-        finally:
-            db.close()
-
-    try:
-        rows = await urls_from_sheet(sheet_url, column, limit)
-        if not rows:
-            update(
-                status="failed",
-                error=f"No URLs found in column {column.upper()} of the sheet.",
-                finished_at=datetime.now(UTC),
-            )
-            return
-        update(total=len(rows))
-
-        buffer: list[CheckResult] = []
-        done = 0
-
-        def flush() -> None:
-            nonlocal buffer
-            if not buffer:
-                return
-            db = session_scope()
-            try:
-                for r in buffer:
-                    db.add(
-                        BacklinkCheck(
-                            agent_id=agent_id, row=r.row, page_url=r.page_url, result=r.result,
-                            rel=r.rel, link_href=r.link_href, anchor_text=r.anchor_text,
-                            http_status=r.http_status, detail=r.detail,
-                        )
-                    )
-                audit = db.get(BacklinkAudit, agent_id)
-                if audit is not None:
-                    audit.done = done
-                db.commit()
-            finally:
-                db.close()
-            buffer = []
-
-        def on_result(result: CheckResult) -> None:
-            nonlocal done
-            done += 1
-            buffer.append(result)
-            if len(buffer) >= 10:
-                flush()
-
-        await check_many(rows, domain, on_result)
-        flush()
-
-        update(status="completed", done=done, finished_at=datetime.now(UTC))
-        db = session_scope()
-        try:
-            db.add(
-                ActivityEntry(
-                    actor="system", action="finished backlink audit", item=name,
-                    after=f"{done} page(s) checked",
-                )
-            )
-            db.commit()
-        finally:
-            db.close()
-    except FetchError as exc:
-        update(status="failed", error=str(exc), finished_at=datetime.now(UTC))
-    except asyncio.CancelledError:
-        update(status="failed", error="The audit was interrupted.", finished_at=datetime.now(UTC))
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Backlink audit crashed")
-        update(status="failed", error=f"Unexpected error: {type(exc).__name__}", finished_at=datetime.now(UTC))
-    finally:
-        _running.pop(agent_id, None)
-
-
-def recover_interrupted() -> None:
-    """A restart kills in-flight audits; mark them failed rather than leave
-    them "running" forever with a spinner nobody can stop."""
-    db = session_scope()
-    try:
-        for audit in db.execute(
-            select(BacklinkAudit).where(BacklinkAudit.status == "running")
-        ).scalars():
-            audit.status = "failed"
-            audit.error = "The server restarted during the audit. Run it again."
-            audit.finished_at = datetime.now(UTC)
-        db.commit()
-    finally:
-        db.close()

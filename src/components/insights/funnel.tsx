@@ -1,35 +1,29 @@
 "use client";
 
 import * as React from "react";
-import type { Conversation } from "@/lib/types";
 
-/* Funnel — horizontal trapezoid bars decreasing in width, counted from the
-   conversations in the selected range. Each bar's trapezoid slopes from this
-   stage's width (top edge) to the next stage's width (bottom edge). */
+/* Funnel — horizontal trapezoid bars decreasing in width.
+   Demo constants as specified by the task brief.
+   Each bar's trapezoid slopes from this stage's width (top edge)
+   to the next stage's width (bottom edge). */
 
 interface Stage {
   label: string;
   count: number;
 }
 
-const APPROVED = new Set(["approved", "manually_posted", "sent"]);
-const POSTED = new Set(["manually_posted", "sent"]);
-
-function stagesFor(convos: Conversation[]): Stage[] {
-  const matched = convos.filter((c) => c.matchedKeywords.length > 0);
-  const relevant = convos.filter((c) => c.intent !== "not_relevant");
-  const safe = relevant.filter((c) => c.riskFlags.length === 0);
-  return [
-    { label: "Collected", count: convos.length },
-    { label: "Matched", count: matched.length },
-    { label: "Relevant", count: relevant.length },
-    { label: "Safe", count: safe.length },
-    { label: "Approved", count: convos.filter((c) => APPROVED.has(c.status)).length },
-    { label: "Posted", count: convos.filter((c) => POSTED.has(c.status)).length },
-  ];
-}
+const STAGES: Stage[] = [
+  { label: "Scanned", count: 480 },
+  { label: "Collected", count: 240 },
+  { label: "Matched", count: 180 },
+  { label: "Scored", count: 180 },
+  { label: "Queued", count: 60 },
+  { label: "Approved", count: 24 },
+  { label: "Posted", count: 18 },
+];
 
 const BAND_COLOR = [
+  "var(--text-muted)",
   "var(--text-muted)",
   "var(--info)",
   "var(--info)",
@@ -38,7 +32,7 @@ const BAND_COLOR = [
   "var(--success)",
 ];
 
-const BAND_OPACITY = [0.45, 0.7, 0.7, 0.8, 0.9, 0.95];
+const BAND_OPACITY = [0.35, 0.55, 0.7, 0.7, 0.8, 0.9, 0.95];
 
 function pctOf(max: number, v: number): number {
   if (max <= 0) return 0;
@@ -50,12 +44,8 @@ function dropOff(prev: number, cur: number): number {
   return Math.round(((cur - prev) / prev) * 100);
 }
 
-export function Funnel({ convos }: { convos: Conversation[] }) {
-  const STAGES = React.useMemo(() => stagesFor(convos), [convos]);
+export function Funnel() {
   const max = STAGES[0].count;
-  if (max === 0) {
-    return <p className="text-sm text-text-muted">No conversations in this range yet.</p>;
-  }
   return (
     <div
       role="img"

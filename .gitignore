@@ -73,12 +73,15 @@ venv/
 backend/*.db
 backend/*.db-wal
 backend/*.db-shm
-backend/*.session
-backend/*.session-journal
 
 # local deploy helper artefacts
 install-server-key.log
 plink.exe
+
+# local-only artefacts (added when merging the production source)
 backend/.venv.broken/
 install-server-key.bat
 Signal-Platform-Response.pdf
+backend/*.session
+backend/*.session-journal
+deploy/.env

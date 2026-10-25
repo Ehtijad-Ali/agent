@@ -23,7 +23,6 @@ import { CountryHeat } from "@/components/insights/country-heat";
 import { KeywordTable } from "@/components/insights/keyword-table";
 import { Funnel } from "@/components/insights/funnel";
 import { ReviewerStats } from "@/components/insights/reviewer-stats";
-import { RefinementIndexCard } from "@/components/insights/refinement-index";
 
 const RANGES: { id: Range; label: string }[] = [
   { id: "24h", label: "24h" },
@@ -134,14 +133,6 @@ export function InsightsView() {
         </SectionCard>
 
         <SectionCard
-          title="Agent Refinement Index"
-          description="How well discovery turns into approved, clicked replies · last 30 days"
-          className="lg:col-span-2"
-        >
-          <RefinementIndexCard />
-        </SectionCard>
-
-        <SectionCard
           title="Score distribution"
           description="Conversations per score band"
           actions={<ScoreBandLegend />}
@@ -165,9 +156,9 @@ export function InsightsView() {
 
         <SectionCard
           title="Conversion funnel"
-          description="Pipeline drop-off from discovery to post"
+          description="Pipeline drop-off from scan to post"
         >
-          <Funnel convos={convos} />
+          <Funnel />
         </SectionCard>
 
         <SectionCard
@@ -183,7 +174,7 @@ export function InsightsView() {
           description="Latency from arrival to first reviewer action"
           className="lg:col-span-2"
         >
-          <ReviewerStats convos={convos} />
+          <ReviewerStats />
         </SectionCard>
       </div>
     </div>

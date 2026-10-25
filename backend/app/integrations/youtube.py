@@ -1,11 +1,16 @@
-"""YouTube comments discovery connector (YouTube Data API v3, API key only).
+"""YouTube connector: comments on recent videos about sports predictions.
 
-Finds recent videos matching the search terms (and the latest uploads of any
-watched channels) and reads their top-level comments. An API key can read but
-never post, so replies happen on YouTube, by a person.
+YouTube comments are one of the largest public conversations about sports
+picks and prediction apps, and the official Data API (v3) exposes them with a
+plain API key: create one at https://console.cloud.google.com (enable
+"YouTube Data API v3").
 
-Quota: search.list costs 100 units, commentThreads.list costs 1. The default
-daily quota is 10,000 units, so each search term costs about 1% of a day.
+Quota is the constraint: 10,000 units a day by default. A search costs 100
+units, a page of comments 1. With the default settings (3 search terms x 5
+videos, twice a day) a day costs about 650 units.
+
+Read-only. Posting comments needs a signed-in channel and would be
+self-promotion under YouTube's spam policy, so replies are posted by hand.
 """
 
 from __future__ import annotations
@@ -16,12 +21,19 @@ from typing import Any
 
 import httpx
 
-from app.integrations.base import ConnectionStatus, NormalisedMessage, PlatformConnector
+from app.integrations.base import (
+    ConnectionStatus,
+    ManualReplyOnly,
+    NormalisedMessage,
+    PlatformConnector,
+)
 from app.utils.hashing import pseudonymise
 
 logger = logging.getLogger(__name__)
 
 API_ROOT = "https://www.googleapis.com/youtube/v3"
+VIDEOS_PER_SEARCH = 5
+COMMENTS_PER_VIDEO = 50
 
 
 class YouTubeError(RuntimeError):
@@ -30,6 +42,7 @@ class YouTubeError(RuntimeError):
 
 class YouTubeConnector(PlatformConnector):
     platform = "youtube"
+    label = "youtube"
 
     def __init__(
         self,
@@ -37,102 +50,109 @@ class YouTubeConnector(PlatformConnector):
         pseudonym_salt: str,
         queries: list[str] | None = None,
         channel_ids: list[str] | None = None,
-        videos_per_query: int = 5,
+        timeout: float = 20.0,
     ) -> None:
+        if not api_key:
+            raise ValueError("YOUTUBE_API_KEY is required")
         self._key = api_key
         self._salt = pseudonym_salt
-        self.queries = queries or []
-        self.channel_ids = [c.strip() for c in channel_ids or [] if c.strip()]
-        self._videos = videos_per_query
+        self.queries = [q for q in (queries or []) if q.strip()]
+        self.channel_ids = [c.strip() for c in (channel_ids or []) if c.strip()]
+        self._timeout = timeout
 
     async def _get(self, client: httpx.AsyncClient, path: str, **params: Any) -> Any:
-        response = await client.get(f"{API_ROOT}{path}", params={**params, "key": self._key})
-        if response.status_code >= 400:
-            reason = ""
-            try:
-                errors = response.json().get("error", {}).get("errors", [])
-                reason = errors[0].get("reason", "") if errors else ""
-            except ValueError:
-                pass
-            if reason == "quotaExceeded":
-                raise YouTubeError("YouTube daily quota is used up; it resets at midnight Pacific.")
-            if reason == "commentsDisabled":
-                raise YouTubeError("comments disabled")
-            raise YouTubeError(f"GET {path}: HTTP {response.status_code} {reason}".strip())
-        return response.json()
+        params["key"] = self._key
+        response = await client.get(f"{API_ROOT}/{path}", params=params)
+        if response.status_code == 200:
+            return response.json()
+        try:
+            reason = response.json()["error"]["errors"][0]["reason"]
+        except (ValueError, KeyError, IndexError):
+            reason = str(response.status_code)
+        raise YouTubeError(reason)
 
     async def health_check(self) -> ConnectionStatus:
         now = datetime.now(UTC)
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                # 1 quota unit: the cheapest call that proves the key works.
-                await self._get(client, "/i18nRegions", part="snippet", hl="en")
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                await self._get(client, "i18nRegions", part="snippet", hl="en")
         except (YouTubeError, httpx.HTTPError) as exc:
-            return ConnectionStatus("youtube", "error", now, error=str(exc))
-        detail = f"Connected. Searching {len(self.queries)} term(s)"
-        if self.channel_ids:
-            detail += f" and watching {len(self.channel_ids)} channel(s)"
-        return ConnectionStatus("youtube", "connected", now, detail=detail + ".")
+            msg = str(exc)
+            if msg in ("keyInvalid", "400"):
+                msg = "The YouTube API key is invalid."
+            elif msg == "accessNotConfigured":
+                msg = "Enable 'YouTube Data API v3' for this key in Google Cloud."
+            return ConnectionStatus(platform="youtube", status="error", last_checked=now, error=msg)
+        return ConnectionStatus(
+            platform="youtube", status="connected", last_checked=now,
+            detail=f"Connected. Searching {len(self.queries)} term(s) for recent videos and reading their comments.",
+        )
 
     async def fetch_messages(self, limit: int = 100) -> list[NormalisedMessage]:
         since = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
         videos: dict[str, str] = {}
-        async with httpx.AsyncClient(timeout=30) as client:
+        out: list[NormalisedMessage] = []
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
             searches = [{"q": q} for q in self.queries] + [{"channelId": c} for c in self.channel_ids]
-            for params in searches:
+            for search in searches:
                 try:
-                    data = await self._get(
-                        client, "/search", part="snippet", type="video", order="date",
-                        maxResults=self._videos, publishedAfter=since, **params,
+                    found = await self._get(
+                        client, "search", part="snippet", type="video", order="date",
+                        publishedAfter=since, maxResults=VIDEOS_PER_SEARCH, **search,
                     )
                 except YouTubeError as exc:
-                    logger.info("YouTube search %s failed: %s", params, exc)
-                    if "quota" in str(exc):
+                    if str(exc) == "quotaExceeded":
+                        logger.warning("YouTube quota exhausted; stopping this scan")
+                        break
+                    raise
+                for item in found.get("items", []):
+                    vid = (item.get("id") or {}).get("videoId")
+                    if vid:
+                        videos[vid] = (item.get("snippet") or {}).get("title", "")
+
+            for vid, title in videos.items():
+                try:
+                    threads = await self._get(
+                        client, "commentThreads", part="snippet", videoId=vid,
+                        maxResults=COMMENTS_PER_VIDEO, order="time", textFormat="plainText",
+                    )
+                except YouTubeError as exc:
+                    # Comments disabled on this video, or quota gone.
+                    if str(exc) == "quotaExceeded":
                         break
                     continue
-                for item in data.get("items", []):
-                    video_id = item.get("id", {}).get("videoId")
-                    if video_id:
-                        videos[video_id] = item.get("snippet", {}).get("title", "")
-
-            out: list[NormalisedMessage] = []
-            for video_id, title in videos.items():
-                try:
-                    data = await self._get(
-                        client, "/commentThreads", part="snippet", videoId=video_id,
-                        maxResults=50, order="time", textFormat="plainText",
-                    )
-                except YouTubeError as exc:
-                    logger.info("YouTube comments for %s skipped: %s", video_id, exc)
-                    continue
-                for thread in data.get("items", []):
-                    msg = self._normalise(thread, video_id, title)
-                    if msg is not None:
+                for thread in threads.get("items", []):
+                    msg = self.normalise(thread, vid, title)
+                    if msg:
                         out.append(msg)
-        return out[:limit] if limit else out
+        return out
 
-    def _normalise(self, thread: dict, video_id: str, title: str) -> NormalisedMessage | None:
-        top = (thread.get("snippet") or {}).get("topLevelComment") or {}
-        snippet = top.get("snippet") or {}
-        text = (snippet.get("textDisplay") or snippet.get("textOriginal") or "").strip()
-        comment_id = top.get("id")
-        if not text or not comment_id:
+    def normalise(self, thread: dict[str, Any], video_id: str, title: str) -> NormalisedMessage | None:
+        top = ((thread.get("snippet") or {}).get("topLevelComment") or {})
+        s = top.get("snippet") or {}
+        text = s.get("textOriginal") or s.get("textDisplay") or ""
+        author = ((s.get("authorChannelId") or {}).get("value")) or s.get("authorDisplayName") or ""
+        if not text.strip() or not author or not top.get("id"):
             return None
-        author = (snippet.get("authorChannelId") or {}).get("value") or snippet.get("authorDisplayName", "")
-        posted = snippet.get("publishedAt")
         try:
-            posted_at = datetime.fromisoformat(posted.replace("Z", "+00:00")) if posted else datetime.now(UTC)
+            posted = datetime.fromisoformat(s.get("publishedAt", "").replace("Z", "+00:00"))
         except ValueError:
-            posted_at = datetime.now(UTC)
+            posted = datetime.now(UTC)
+        short_title = (title[:80] + "…") if len(title) > 80 else title
         return NormalisedMessage(
             platform="youtube",
-            external_id=comment_id,
-            community=(title or video_id)[:200],
-            author_pseudonym=pseudonymise("youtube", str(author), self._salt),
-            message=text[:4000],
-            posted_at=posted_at,
-            source_url=f"https://www.youtube.com/watch?v={video_id}&lc={comment_id}",
+            external_id=f"{video_id}:{top['id']}",
+            community=f"YouTube: {short_title or video_id}",
+            author_pseudonym=pseudonymise("youtube", author, self._salt),
+            message=text.strip()[:4000],
+            posted_at=posted,
+            country=None,
+            language=None,
+            source_url=f"https://www.youtube.com/watch?v={video_id}&lc={top['id']}",
         )
 
     async def send_message(self, chat_id: str, text: str, reply_to: str | None = None) -> str:
-        raise NotImplementedError("YouTube is read-only here: reply on YouTube, then mark it posted.")
+        raise ManualReplyOnly(
+            "Replies on YouTube are posted by hand: open the comment, reply there, "
+            "then click Mark posted."
+        )

@@ -22,7 +22,6 @@ from app.api.routes import (
     agents,
     assistant,
     auth,
-    automation,
     conversations,
     engine,
     health,
@@ -44,6 +43,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("signal")
+# httpx logs every request URL at INFO, and a Telegram Bot API URL embeds the
+# bot token. Left at INFO, the token ends up in plain text in every log file.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 settings = get_settings()
 
@@ -71,9 +73,6 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _validate_configuration() -> None:
-    from app.utils.background import capture_loop
-
-    capture_loop()
     problems = settings.validate_for_production()
     if problems:
         raise RuntimeError("Invalid production configuration: " + "; ".join(problems))
@@ -86,15 +85,20 @@ async def _validate_configuration() -> None:
 
     init_db()
     engine.load_active_config()
-    # Work that was in flight when the process last stopped cannot resume
-    # mid-call; mark it so the UI shows a clear message instead of a spinner.
-    from app.services import backlink_service
-    from app.services.assistant import runner
-
-    backlink_service.recover_interrupted()
-    runner.recover_interrupted()
+    _recover_agent_tasks()
     if poller.start():
         logger.info("Ingestion is live.")
+
+
+def _recover_agent_tasks() -> None:
+    from app.db.session import session_scope
+    from app.services.agent_engine import recover_on_startup
+
+    db = session_scope()
+    try:
+        recover_on_startup(db)
+    finally:
+        db.close()
 
 
 @app.on_event("shutdown")
@@ -171,14 +175,12 @@ app.include_router(conversations.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(activity.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(agents.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(assistant.router, prefix="/api", dependencies=_SIGNED_IN)
-app.include_router(platforms.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(insights.router, prefix="/api", dependencies=_SIGNED_IN)
+app.include_router(platforms.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(scans.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(search.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(replies.router, prefix="/api", dependencies=_SIGNED_IN)
 app.include_router(users.router, prefix="/api", dependencies=_SIGNED_IN)
-# n8n workflows authenticate with the shared secret, not a browser session.
-app.include_router(automation.router, prefix="/api")
 # No /api prefix: /r/{slug} is pasted into public messages, so it stays short.
 app.include_router(tracking.router)
 

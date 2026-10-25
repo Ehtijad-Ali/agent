@@ -7,15 +7,17 @@ nothing starts acting as a side effect of being configured.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import Response
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
-from app.models import ActivityEntry, Agent, AgentOutput, BacklinkAudit, BacklinkCheck
+from app.db.session import get_db, session_scope
+from app.models import ActivityEntry, Agent, AgentOutput, BacklinkCheck, ScanRun
 from app.schemas.agent import (
     AgentCreate,
     AgentOut,
@@ -23,8 +25,8 @@ from app.schemas.agent import (
     AgentOutputPage,
     AgentUpdate,
     BacklinkAuditOut,
+    BacklinkAuditRules,
     BacklinkCheckOut,
-    BacklinkRules,
     ContentRules,
     EngagementRules,
     PublishRequest,
@@ -50,7 +52,7 @@ def _validate_rules(agent_type: str, rules: dict) -> dict:
     model = {
         "engagement": EngagementRules,
         "content": ContentRules,
-        "backlink_audit": BacklinkRules,
+        "backlink_audit": BacklinkAuditRules,
     }[agent_type]
     try:
         return model.model_validate(rules).model_dump(by_alias=True)
@@ -68,6 +70,29 @@ def _get_or_404(db: Session, agent_id: str) -> Agent:
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No agent with id {agent_id}."
         )
     return agent
+
+
+_SHEET_LINK = re.compile(r"https://docs\.google\.com/spreadsheets/d/\S+")
+
+
+def _scan_now(db: Session, background: BackgroundTasks, agent: Agent) -> None:
+    """Run a scan as soon as an engagement agent is switched on.
+
+    Scheduled scans run twice a day, so without this a freshly enabled agent
+    does nothing visible for up to twelve hours -- which reads as broken.
+    """
+    if agent.agent_type != "engagement" or not agent.enabled:
+        return
+    from app.api.routes.scans import _execute
+    from app.services.ingestion_service import build_connectors
+
+    if not build_connectors():
+        return
+
+    scan = ScanRun(status="running", trigger="manual")
+    db.add(scan)
+    db.commit()
+    background.add_task(_execute, scan.id)
 
 
 def _out(agent: Agent) -> AgentOut:
@@ -128,23 +153,32 @@ def list_types() -> dict:
                     "checks whether its link to your site is dofollow. Results "
                     "download as a CSV that lines up with the sheet."
                 ),
-                "ruleSchema": BacklinkRules.model_json_schema(by_alias=True),
+                "ruleSchema": BacklinkAuditRules.model_json_schema(by_alias=True),
             },
         ]
     }
 
 
 @router.post("", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
-def create_agent(request: AgentCreate, db: Session = Depends(get_db)) -> AgentOut:
+def create_agent(
+    request: AgentCreate, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> AgentOut:
     # No explicit type check: AgentType is a Literal over AGENT_TYPES, so an
     # unknown type is rejected as a 422 during request validation before this
     # body runs. A second check here would be unreachable.
+    rules = dict(request.rules)
+    if request.agent_type == "backlink_audit" and not rules.get("sheetUrl"):
+        # People paste the sheet link into the description; use it rather than
+        # make them enter it twice.
+        found = _SHEET_LINK.search(request.description or "")
+        if found:
+            rules["sheetUrl"] = found.group(0)
     agent = Agent(
         name=request.name.strip(),
         agent_type=request.agent_type,
         description=request.description,
         enabled=1 if request.enabled else 0,
-        rules=_validate_rules(request.agent_type, request.rules),
+        rules=_validate_rules(request.agent_type, rules),
     )
     db.add(agent)
     db.add(
@@ -152,7 +186,8 @@ def create_agent(request: AgentCreate, db: Session = Depends(get_db)) -> AgentOu
             actor=ACTOR,
             action="created agent",
             item=agent.name,
-            after=agent.agent_type,
+            after=agent.agent_type
+            + ("" if agent.enabled else " (disabled -- enable it to start)"),
         )
     )
     try:
@@ -165,6 +200,7 @@ def create_agent(request: AgentCreate, db: Session = Depends(get_db)) -> AgentOu
         ) from exc
 
     db.refresh(agent)
+    _scan_now(db, background, agent)
     return _out(agent)
 
 
@@ -175,7 +211,10 @@ def get_agent(agent_id: str, db: Session = Depends(get_db)) -> AgentOut:
 
 @router.patch("/{agent_id}", response_model=AgentOut)
 def update_agent(
-    agent_id: str, request: AgentUpdate, db: Session = Depends(get_db)
+    agent_id: str,
+    request: AgentUpdate,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
 ) -> AgentOut:
     agent = _get_or_404(db, agent_id)
     before = "enabled" if agent.enabled else "disabled"
@@ -208,19 +247,16 @@ def update_agent(
         ) from exc
 
     db.refresh(agent)
+    if before == "disabled":
+        _scan_now(db, background, agent)
     return _out(agent)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_agent(agent_id: str, db: Session = Depends(get_db)) -> None:
     agent = _get_or_404(db, agent_id)
-    if backlink_service.is_running(agent.id):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An audit is running for this agent. Wait for it to finish first.",
-        )
-    db.execute(delete(BacklinkCheck).where(BacklinkCheck.agent_id == agent.id))
-    db.execute(delete(BacklinkAudit).where(BacklinkAudit.agent_id == agent.id))
+    db.query(BacklinkCheck).filter(BacklinkCheck.agent_id == agent.id).delete()
+    _audits.pop(agent.id, None)
     db.delete(agent)
     db.add(
         ActivityEntry(actor=ACTOR, action="deleted agent", item=agent.name)
@@ -361,10 +397,73 @@ def agent_refinement(
     return RefinementIndex.model_validate(compute(db, agent, days))
 
 
-# --- backlink audits --------------------------------------------------------
+# --- backlink audit agents ---------------------------------------------------
+
+# Progress of the current or last run per agent. In memory because a run lasts
+# minutes and the API is one process; the results themselves are persisted.
+_audits: dict[str, dict] = {}
+
+_RESULT_KINDS = ("dofollow", "nofollow", "not_found", "error")
 
 
-def _audit_agent_or_409(db: Session, agent_id: str) -> Agent:
+async def _run_audit(agent_id: str) -> None:
+    state = _audits[agent_id]
+    db = session_scope()
+    try:
+        agent = db.get(Agent, agent_id)
+        rules = BacklinkAuditRules.model_validate(agent.rules or {})
+        urls = await backlink_service.read_sheet(rules.sheet_url, rules.url_column)
+        urls = urls[: rules.max_urls]
+        state["total"] = len(urls)
+
+        # In batches so the progress counter moves while the run is going.
+        results = []
+        for start in range(0, len(urls), 25):
+            results.extend(
+                await backlink_service.audit(urls[start : start + 25], rules.target_domain)
+            )
+            state["done"] = len(results)
+
+        db.query(BacklinkCheck).filter(BacklinkCheck.agent_id == agent_id).delete()
+        now = datetime.now(UTC)
+        for r in results:
+            db.add(
+                BacklinkCheck(
+                    agent_id=agent_id,
+                    row=r.row,
+                    page_url=r.page_url,
+                    result=r.result,
+                    rel=r.rel[:255],
+                    link_href=r.link_href,
+                    anchor_text=r.anchor_text,
+                    http_status=r.http_status,
+                    detail=r.detail,
+                    checked_at=now,
+                )
+            )
+        counts = {k: sum(1 for r in results if r.result == k) for k in _RESULT_KINDS}
+        db.add(
+            ActivityEntry(
+                actor=agent.name[:64],
+                action="backlink audit",
+                item=f"{len(results)} page(s) checked",
+                after=", ".join(f"{v} {k.replace('_', ' ')}" for k, v in counts.items()),
+            )
+        )
+        db.commit()
+        state["status"] = "completed"
+    except backlink_service.BacklinkError as exc:
+        state.update(status="failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 -- a failed run must be reported, not lost
+        logger.exception("Backlink audit for %s failed", agent_id)
+        db.rollback()
+        state.update(status="failed", error=f"Unexpected error: {exc!r}"[:300])
+    finally:
+        state["finished_at"] = datetime.now(UTC)
+        db.close()
+
+
+def _audit_agent(db: Session, agent_id: str) -> Agent:
     agent = _get_or_404(db, agent_id)
     if agent.agent_type != "backlink_audit":
         raise HTTPException(
@@ -374,69 +473,50 @@ def _audit_agent_or_409(db: Session, agent_id: str) -> Agent:
     return agent
 
 
-def _audit_out(db: Session, agent_id: str) -> BacklinkAuditOut:
-    audit = db.get(BacklinkAudit, agent_id)
-    if audit is None:
-        return BacklinkAuditOut(status="idle")
-    checks = (
-        db.execute(
-            select(BacklinkCheck)
-            .where(BacklinkCheck.agent_id == agent_id)
-            .order_by(BacklinkCheck.row)
-        )
-        .scalars()
-        .all()
-    )
-    counts: dict[str, int] = {}
-    for check in checks:
-        counts[check.result] = counts.get(check.result, 0) + 1
-    return BacklinkAuditOut(
-        status=audit.status,
-        total=audit.total,
-        done=audit.done,
-        error=audit.error,
-        started_at=audit.started_at,
-        finished_at=audit.finished_at,
-        counts=counts,
-        items=[BacklinkCheckOut.model_validate(c) for c in checks],
-    )
-
-
-@router.post("/{agent_id}/audit", response_model=BacklinkAuditOut)
-def start_audit(agent_id: str, db: Session = Depends(get_db)) -> BacklinkAuditOut:
+@router.post(
+    "/{agent_id}/audit",
+    response_model=BacklinkAuditOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_audit(
+    agent_id: str, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> BacklinkAuditOut:
     """Start checking every URL in the agent's sheet. Poll GET .../audit."""
-    agent = _audit_agent_or_409(db, agent_id)
+    agent = _audit_agent(db, agent_id)
     if not agent.enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Agent '{agent.name}' is disabled. Enable it first.",
         )
-    if not str((agent.rules or {}).get("sheetUrl", "")).strip():
+    rules = BacklinkAuditRules.model_validate(agent.rules or {})
+    if not rules.sheet_url:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Add the Google Sheet link first.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Set the Google Sheet link for this agent first.",
         )
-    if backlink_service.is_running(agent.id):
+    if _audits.get(agent_id, {}).get("status") == "running":
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An audit is already running for this agent.",
+            status_code=status.HTTP_409_CONFLICT, detail="An audit is already running."
         )
-    backlink_service.start_audit(agent)
-    db.expire_all()
-    return _audit_out(db, agent.id)
+
+    _audits[agent_id] = {
+        "status": "running",
+        "total": 0,
+        "done": 0,
+        "error": None,
+        "started_at": datetime.now(UTC),
+        "finished_at": None,
+    }
+    db.add(ActivityEntry(actor=ACTOR, action="started backlink audit", item=agent.name))
+    db.commit()
+    background.add_task(_run_audit, agent_id)
+    return get_audit(agent_id, db)
 
 
 @router.get("/{agent_id}/audit", response_model=BacklinkAuditOut)
 def get_audit(agent_id: str, db: Session = Depends(get_db)) -> BacklinkAuditOut:
-    _audit_agent_or_409(db, agent_id)
-    return _audit_out(db, agent_id)
-
-
-@router.get("/{agent_id}/audit.csv")
-def audit_csv(agent_id: str, db: Session = Depends(get_db)) -> Response:
-    """Results in sheet order; the Result column pastes into column B."""
-    agent = _audit_agent_or_409(db, agent_id)
-    checks = (
+    _audit_agent(db, agent_id)
+    rows = (
         db.execute(
             select(BacklinkCheck)
             .where(BacklinkCheck.agent_id == agent_id)
@@ -445,9 +525,35 @@ def audit_csv(agent_id: str, db: Session = Depends(get_db)) -> Response:
         .scalars()
         .all()
     )
-    safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in agent.name.lower())[:60]
+    # After a restart the in-memory state is gone but the results are not.
+    state = _audits.get(agent_id) or {"status": "completed" if rows else "idle"}
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r.result] = counts.get(r.result, 0) + 1
+    return BacklinkAuditOut(
+        status=state["status"],
+        total=state.get("total", len(rows)),
+        done=state.get("done", len(rows)),
+        error=state.get("error"),
+        started_at=state.get("started_at"),
+        finished_at=state.get("finished_at"),
+        counts=counts,
+        items=[BacklinkCheckOut.model_validate(r) for r in rows],
+    )
+
+
+@router.get("/{agent_id}/audit.csv")
+def audit_csv(agent_id: str, db: Session = Depends(get_db)) -> Response:
+    """Results in sheet order; the Result column pastes into column B."""
+    agent = _audit_agent(db, agent_id)
+    rows = (
+        db.execute(select(BacklinkCheck).where(BacklinkCheck.agent_id == agent_id))
+        .scalars()
+        .all()
+    )
+    filename = re.sub(r"[^A-Za-z0-9_-]+", "-", agent.name).strip("-") or "backlinks"
     return Response(
-        content=backlink_service.to_csv(checks),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="backlinks-{safe or "audit"}.csv"'},
+        content=backlink_service.results_csv(rows),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'},
     )

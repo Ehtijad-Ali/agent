@@ -45,39 +45,43 @@ def _rate(numerator: int, denominator: int) -> float:
 
 
 def compute(db: Session, agent: Agent | None = None, days: int = 30) -> dict:
-    """The index over the window. ``agent`` is advisory until conversations
-    carry an agent id; today the figures are system-wide and the agent is
-    reported alongside them for context."""
+    """The index over the window.
+
+    With an agent, only the conversations that agent picked up count: scans
+    record "picked up by agent" in each conversation's history, so the figures
+    are that agent's own. Without one, they are system-wide.
+    """
     since = datetime.now(UTC) - timedelta(days=days)
-    in_window = Conversation.posted_at >= since
+    rows = db.execute(
+        select(Conversation.id, Conversation.intent, Conversation.status, Conversation.history)
+        .where(Conversation.posted_at >= since)
+    ).all()
+    if agent is not None:
+        rows = [
+            r for r in rows
+            if any(
+                h.get("actor") == agent.name and h.get("action") == "picked up by agent"
+                for h in (r.history or [])
+            )
+        ]
+    ids = [r.id for r in rows]
 
-    discovered = db.execute(
-        select(func.count(Conversation.id)).where(in_window)
-    ).scalar_one()
-    relevant = db.execute(
-        select(func.count(Conversation.id)).where(
-            in_window, Conversation.intent.in_(_RELEVANT)
-        )
-    ).scalar_one()
-    reviewed = db.execute(
-        select(func.count(Conversation.id)).where(
-            in_window, Conversation.status.in_(_REVIEWED)
-        )
-    ).scalar_one()
-    approved = db.execute(
-        select(func.count(Conversation.id)).where(
-            in_window, Conversation.status.in_(("approved", "sent", "manually_posted"))
-        )
-    ).scalar_one()
+    discovered = len(rows)
+    relevant = sum(1 for r in rows if r.intent in _RELEVANT)
+    reviewed = sum(1 for r in rows if r.status in _REVIEWED)
+    approved = sum(1 for r in rows if r.status in ("approved", "sent", "manually_posted"))
 
-    sent = db.execute(
-        select(func.count(ReplySend.id)).where(ReplySend.sent_at >= since)
-    ).scalar_one()
-    clicked = db.execute(
+    sent_q = select(func.count(ReplySend.id)).where(ReplySend.sent_at >= since)
+    clicked_q = (
         select(func.count(func.distinct(TrackingLink.conversation_id)))
         .join(LinkClick, LinkClick.link_id == TrackingLink.id)
         .where(LinkClick.is_bot == 0, LinkClick.clicked_at >= since)
-    ).scalar_one()
+    )
+    if agent is not None:
+        sent_q = sent_q.where(ReplySend.conversation_id.in_(ids))
+        clicked_q = clicked_q.where(TrackingLink.conversation_id.in_(ids))
+    sent = db.execute(sent_q).scalar_one()
+    clicked = db.execute(clicked_q).scalar_one()
 
     precision = _rate(relevant, discovered)
     approval_rate = _rate(approved, reviewed)

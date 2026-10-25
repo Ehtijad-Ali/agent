@@ -26,6 +26,7 @@ argon2-cffi==23.1.0
 
 # --- http / integrations ---
 httpx==0.28.1
+telethon==1.45.0
 
 # --- observability ---
 structlog==25.1.0

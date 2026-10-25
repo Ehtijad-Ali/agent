@@ -55,21 +55,36 @@ class Settings(BaseSettings):
     # --- AI (spec §14) ---
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = ""
-    ollama_timeout_seconds: int = 120
-    # AI-written summaries and replies during a scan. Each is one model call,
-    # so a scan drafts at most this many with AI; the rest use templates.
-    ai_max_per_scan: int = 15
-    # The AI Agent (assistant) can use a different model from reply drafting.
-    # Blank means "same as OLLAMA_MODEL". A small tool-calling model such as
-    # qwen2.5:3b keeps each step fast on a CPU-only server.
-    assistant_model: str = ""
-    # Each assistant step waits on the model; a cold CPU model can take a
-    # minute or more to load, so this is deliberately longer than the above.
-    assistant_timeout_seconds: int = 300
-    assistant_max_iterations: int = 8
-    # Optional hosted fallback. Used only when OLLAMA_MODEL is unset.
+    # CPU inference is slow; an agent step with a long prompt can take minutes.
+    ollama_timeout_seconds: int = 600
+    # Context window. Ollama's default is small enough to cut off tool results
+    # without an error, so it is set explicitly.
+    ollama_context: int = 8192
+
+    # Which model serves the AI Agent and AI drafts: "ollama" or "groq".
+    ai_provider: str = "ollama"
+    # AI-written summaries and replies for new leads at or above this score.
+    # Leads below it keep the instant template drafts; on a CPU-only server
+    # spending a minute on an irrelevant message is the wrong trade.
+    ai_draft_min_score: int = 40
+    ai_drafts_per_scan: int = 25
+
+    # --- AI agent (Groq) ---
+    # The key never leaves this process: it is not sent to the browser, logged,
+    # or written anywhere but this environment.
     groq_api_key: str = ""
-    groq_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "openai/gpt-oss-120b"
+    # Model for the built-in web-search tool; must be one Groq offers it on.
+    groq_search_model: str = "openai/gpt-oss-120b"
+    groq_timeout_seconds: int = 90
+    # Hard limits on one agent task, so a confused model cannot loop forever
+    # or burn through the account.
+    agent_max_iterations: int = 12
+    agent_max_seconds: int = 600
+    agent_max_tokens_per_task: int = 200_000
+    agent_daily_tasks_per_user: int = 200
+    # Conversations older than this are deleted at startup; 0 keeps them.
+    agent_retention_days: int = 90
 
     # --- platform credentials (spec §29 -- never leave this process) ---
     telegram_bot_token: str = ""
@@ -77,16 +92,21 @@ class Settings(BaseSettings):
     discord_bot_token: str = ""
     discord_application_id: str = ""
 
-    # --- discovery connectors (read-only keyword search) ---
+    # Reddit app (https://www.reddit.com/prefs/apps, type "script").
     reddit_client_id: str = ""
     reddit_client_secret: str = ""
-    reddit_user_agent: str = "signal-discovery/0.1"
+    reddit_user_agent: str = "signal-monitor/1.0 (by joinallbettors)"
+    # YouTube Data API v3 key (Google Cloud console).
     youtube_api_key: str = ""
-    # Telegram *account* (MTProto), not the bot. Needs Telethon and a session
-    # signed in once on the server -- see docs in the Platforms screen.
+    # Dedicated Telegram account (https://my.telegram.org + scripts/telegram_login.py).
     telegram_api_id: str = ""
     telegram_api_hash: str = ""
-    telegram_session: str = "telegram_account"
+    telegram_session: str = ""
+
+    # n8n webhook that receives strong new leads after each scan, e.g.
+    # http://127.0.0.1:5678/n8n/webhook/new-lead. Empty disables it.
+    n8n_lead_webhook_url: str = ""
+    lead_alert_min_score: int = 70
 
     # --- CORS (spec §38) ---
     frontend_url: str = "http://localhost:3000"
@@ -94,9 +114,6 @@ class Settings(BaseSettings):
 
     n8n_base_url: str = ""
     n8n_webhook_secret: str = ""
-    # The n8n Webhook node URL Signal posts events to (lead found, status
-    # changed, reply sent, scan finished). Blank turns events off.
-    n8n_webhook_url: str = ""
 
     @property
     def cors_origins(self) -> list[str]:

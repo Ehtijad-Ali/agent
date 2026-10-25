@@ -32,11 +32,7 @@ import { InspectorAnalysis } from "./inspector-analysis";
 import { InspectorReply } from "./inspector-reply";
 import { InspectorSource } from "./inspector-source";
 import { InspectorHistory } from "./inspector-history";
-import type { Conversation, Platform, Status } from "@/lib/types";
-
-// Discovery platforms are read-only: the reply is posted by a person on the
-// platform itself, then recorded here with "Mark posted".
-const REPLY_ON_PLATFORM: ReadonlySet<Platform> = new Set(["reddit", "youtube"]);
+import type { Conversation, Status } from "@/lib/types";
 
 interface InspectorProps {
   conversation: Conversation | null;
@@ -44,6 +40,11 @@ interface InspectorProps {
   onToggleCollapse: () => void;
   onAfterAction: () => void;
 }
+
+
+// Found by read-only discovery connectors: a person replies on the platform
+// itself, then records it with "Mark posted".
+const MANUAL_PLATFORMS = new Set(["reddit", "youtube"]);
 
 export function Inspector({
   conversation,
@@ -81,22 +82,6 @@ export function Inspector({
     },
     [conversation, updateConversation],
   );
-
-  const handleAiRedraft = React.useCallback(async () => {
-    if (!conversation) return;
-    try {
-      const updated = await api.aiRedraft(conversation.id);
-      const { conversations, setConversations } = useSignalStore.getState();
-      setConversations(conversations.map((c) => (c.id === updated.id ? updated : c)));
-      toast({ title: "AI rewrote the summary and drafts", duration: 2400 });
-    } catch (cause) {
-      toast({
-        title: "AI redraft failed",
-        description: cause instanceof api.ApiError ? cause.message : "Try again.",
-        variant: "destructive",
-      });
-    }
-  }, [conversation, toast]);
 
   const handleEditReply = React.useCallback(
     (text: string) => {
@@ -145,7 +130,6 @@ export function Inspector({
                   textareaRef={replyRef}
                   onVariantChange={handleVariantChange}
                   onEditReply={handleEditReply}
-                  onAiRedraft={conversation.riskFlags.length ? undefined : handleAiRedraft}
                   onToast={(msg) => toast({ title: msg, duration: 2400 })}
                 />
               </div>
@@ -375,17 +359,11 @@ function FooterActions({
         <Pencil className="h-3.5 w-3.5" />
         {conversation.status === "manually_posted" ? "Posted" : "Mark posted"}
       </Button>
-      {REPLY_ON_PLATFORM.has(conversation.platform) ? (
+      {MANUAL_PLATFORMS.has(conversation.platform) ? (
         conversation.sourceUrl ? (
-          <Button
-            size="sm"
-            variant="outline"
-            asChild
-            title="Open the original post to reply there, then click Mark posted"
-          >
+          <Button size="sm" variant="outline" asChild title="Open the original post to reply there, then click Mark posted">
             <a href={conversation.sourceUrl} target="_blank" rel="noreferrer">
-              <Send className="h-3.5 w-3.5" /> Reply on{" "}
-              {conversation.platform === "youtube" ? "YouTube" : "Reddit"}
+              <Send className="h-3.5 w-3.5" /> Reply on {conversation.platform === "youtube" ? "YouTube" : "Reddit"}
             </a>
           </Button>
         ) : null

@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -25,13 +24,10 @@ from app.core.config import get_settings
 from app.integrations.base import NormalisedMessage, PlatformConnector
 from app.integrations.discord import DiscordConnector, DiscordError
 from app.integrations.telegram import TelegramConnector, TelegramError
-from app.models import ActivityEntry, Conversation, ScanRun
+from app.models import ActivityEntry, Agent, Conversation, ScanRun
 from app.schemas.tuning import TuningConfig
 from app.services.reply_service import detect_language, draft_all_variants
 from app.services.scoring_service import ScoreResult, score_message
-
-if TYPE_CHECKING:
-    from app.services.ai_service import AIDraft
 
 logger = logging.getLogger("signal.ingestion")
 
@@ -101,29 +97,14 @@ def active_config() -> TuningConfig:
 
 
 def normalise_to_conversation(
-    msg: NormalisedMessage, config: TuningConfig, ai: "AIDraft | None" = None
+    msg: NormalisedMessage, config: TuningConfig
 ) -> Conversation:
-    """Score one normalised message into an unsaved Conversation row.
-
-    ``ai`` replaces the template summary and drafts when the model produced
-    them; risk-flagged messages never get a draft either way.
-    """
+    """Score one normalised message into an unsaved Conversation row."""
     country = msg.country or None
     result = score_message(msg.message, config, country, msg.posted_at)
 
     blocked = bool(result.risk_flags)
     variants = [] if blocked else draft_all_variants(msg.community, config.voice)
-    summary = build_summary(msg.message, result.matched_keywords, result.risk_flags)
-    language = msg.language or detect_language(msg.message)
-    history = [
-        {"at": datetime.now(UTC).isoformat(), "actor": "system", "action": "discovered by scan"}
-    ]
-    if ai is not None and not blocked:
-        variants, language = ai.variants, ai.language
-        summary = ai.summary or summary
-        history.append(
-            {"at": datetime.now(UTC).isoformat(), "actor": "system", "action": "AI drafted summary and replies"}
-        )
 
     return Conversation(
         platform=msg.platform,
@@ -134,7 +115,7 @@ def normalise_to_conversation(
         message=msg.message,
         posted_at=msg.posted_at,
         country=country or UNKNOWN_COUNTRY,
-        language=language,
+        language=msg.language or detect_language(msg.message),
         score=result.score,
         intent=result.intent,
         confidence=result.confidence,
@@ -144,57 +125,113 @@ def normalise_to_conversation(
             for c in result.contributions
         ],
         risk_flags=list(result.risk_flags),
-        summary=summary,
+        summary=build_summary(msg.message, result.matched_keywords, result.risk_flags),
         status=initial_status(result),
         reply_variants=variants,
         selected_variant=0,
         edited_reply=None,
-        history=history,
+        history=[
+            {
+                "at": datetime.now(UTC).isoformat(),
+                "actor": "system",
+                "action": "discovered by scan",
+            }
+        ],
     )
 
 
-def build_connectors() -> list[tuple[str, PlatformConnector]]:
+def source_settings(db: Session | None = None) -> dict[str, dict]:
+    """Search terms and sources per discovery platform, with defaults filled in."""
+    from app.models.platform_settings import DEFAULTS, PlatformSettings
+
+    out = {k: dict(v) for k, v in DEFAULTS.items()}
+    own = db is None
+    if own:
+        from app.db.session import session_scope
+
+        try:
+            db = session_scope()
+        except RuntimeError:  # no database configured (tests, engine-only mode)
+            return out
+    try:
+        for row in db.execute(select(PlatformSettings)).scalars():
+            out[row.platform] = {**out.get(row.platform, {}), **(row.config or {})}
+    except Exception:  # noqa: BLE001 -- table missing on first boot; defaults apply
+        logger.debug("platform_settings unavailable; using defaults")
+    finally:
+        if own:
+            db.close()
+    return out
+
+
+def build_connectors(db: Session | None = None) -> list[tuple[str, PlatformConnector]]:
     """Only platforms with complete credentials.
 
     A missing token is not an error here -- it is a platform that is not
-    connected yet, which the caller reports as such.
+    connected yet, which the caller reports as such. The first element of each
+    pair is the platform the messages are stored under; the Telegram bot and
+    the Telegram account both store under "telegram", so a message either can
+    see is kept once.
     """
     settings = get_settings()
     out: list[tuple[str, PlatformConnector]] = []
     if not settings.pseudonym_salt:
         logger.warning("PSEUDONYM_SALT is unset; ingestion disabled.")
         return out
+    salt = settings.pseudonym_salt
     if settings.discord_bot_token:
-        out.append(
-            (
-                "discord",
-                DiscordConnector(settings.discord_bot_token, settings.pseudonym_salt),
-            )
-        )
+        out.append(("discord", DiscordConnector(settings.discord_bot_token, salt)))
     if settings.telegram_bot_token:
-        out.append(
-            (
-                "telegram",
-                TelegramConnector(settings.telegram_bot_token, settings.pseudonym_salt),
-            )
-        )
+        out.append(("telegram", TelegramConnector(settings.telegram_bot_token, salt)))
+
+    has_reddit = bool(settings.reddit_client_id and settings.reddit_client_secret)
+    has_youtube = bool(settings.youtube_api_key)
+    has_tg_account = bool(
+        settings.telegram_api_id and settings.telegram_api_hash and settings.telegram_session
+    )
+    if not (has_reddit or has_youtube or has_tg_account):
+        return out
+    sources = source_settings(db)
+    if has_reddit:
+        from app.integrations.reddit import RedditConnector
+
+        cfg = sources["reddit"]
+        out.append(("reddit", RedditConnector(
+            settings.reddit_client_id, settings.reddit_client_secret,
+            settings.reddit_user_agent, salt, cfg.get("queries"), cfg.get("subreddits"),
+        )))
+    if has_youtube:
+        from app.integrations.youtube import YouTubeConnector
+
+        cfg = sources["youtube"]
+        out.append(("youtube", YouTubeConnector(
+            settings.youtube_api_key, salt, cfg.get("queries"), cfg.get("channel_ids"),
+        )))
+    if has_tg_account:
+        from app.integrations.telegram_account import TelegramAccountConnector
+
+        cfg = sources["telegram_account"]
+        out.append(("telegram", TelegramAccountConnector(
+            settings.telegram_api_id, settings.telegram_api_hash, settings.telegram_session,
+            salt, cfg.get("queries"), cfg.get("chats"),
+        )))
     return out
 
 
-def build_discovery_connectors(db: Session) -> list[tuple[str, PlatformConnector]]:
-    """Reddit, YouTube and the Telegram account, when each is set up.
+def sender_for(platform: str) -> PlatformConnector | None:
+    """The connector that may post replies on a platform: the bots only.
 
-    The first element is the label recorded in the scan outcome; messages carry
-    their own platform, which is what de-duplication keys on.
+    Discovery connectors (Reddit, YouTube, the Telegram account) are read-only;
+    replies found through them are posted by a person.
     """
-    from app.services import sources_service
-
-    out: list[tuple[str, PlatformConnector]] = []
-    for name in sources_service.DISCOVERY_PLATFORMS:
-        connector = sources_service.build_connector(db, name)
-        if connector is not None:
-            out.append((name, connector))
-    return out
+    settings = get_settings()
+    if not settings.pseudonym_salt:
+        return None
+    if platform == "discord" and settings.discord_bot_token:
+        return DiscordConnector(settings.discord_bot_token, settings.pseudonym_salt)
+    if platform == "telegram" and settings.telegram_bot_token:
+        return TelegramConnector(settings.telegram_bot_token, settings.pseudonym_salt)
+    return None
 
 
 def _existing_external_ids(db: Session, platform: str, ids: list[str]) -> set[str]:
@@ -209,40 +246,51 @@ def _existing_external_ids(db: Session, platform: str, ids: list[str]) -> set[st
     return set(rows)
 
 
-async def ai_drafts_for(
-    db: Session, platform: str, messages: list[NormalisedMessage], config: TuningConfig
-) -> dict[str, "AIDraft"]:
-    """AI summaries and replies for the new, relevant messages in a batch.
+def enabled_engagement_agents(db: Session) -> list[Agent]:
+    return list(
+        db.execute(
+            select(Agent).where(Agent.agent_type == "engagement", Agent.enabled == 1)
+        ).scalars()
+    )
 
-    Only messages that are not stored yet, carry no risk flag and reach the
-    "low intent" threshold, and at most AI_MAX_PER_SCAN of them: each draft
-    is a model call, which on a CPU server is tens of seconds.
+
+def agent_accepts(agent: Agent, conv: Conversation) -> bool:
+    """Whether a conversation falls inside an engagement agent's rules."""
+    rules = agent.rules or {}
+    if conv.platform not in rules.get("platforms", ["discord", "telegram"]):
+        return False
+    if conv.score < int(rules.get("minScore", 0)):
+        return False
+    if conv.risk_flags and rules.get("skipRiskFlagged", True):
+        return False
+    return True
+
+
+def assign_agents(
+    conversations: list[Conversation], agents: list[Agent]
+) -> dict[str, int]:
+    """Record on each new conversation which agents picked it up.
+
+    Returns the count per agent name so the scan can report it. An agent that
+    matched nothing still appears with 0 -- "ran and found nothing" and "never
+    ran" must not look the same.
     """
-    from app.services import ai_service
-
-    if not ai_service.enabled():
-        return {}
-    settings = get_settings()
-    seen = _existing_external_ids(db, platform, [m.external_id for m in messages])
-    candidates: list[tuple[int, NormalisedMessage]] = []
-    for msg in messages:
-        if msg.external_id in seen:
+    counts = {a.name: 0 for a in agents}
+    now = datetime.now(UTC).isoformat()
+    for conv in conversations:
+        picked = [a for a in agents if agent_accepts(a, conv)]
+        if not picked:
             continue
-        result = score_message(msg.message, config, msg.country or None, msg.posted_at)
-        if result.risk_flags or result.score < config.thresholds.low:
-            continue
-        candidates.append((result.score, msg))
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-
-    drafts: dict[str, ai_service.AIDraft] = {}
-    for _, msg in candidates[: settings.ai_max_per_scan]:
-        draft = await ai_service.draft(
-            msg.message, msg.community, config.voice, msg.language or detect_language(msg.message)
-        )
-        if draft is None:
-            break  # the model is down or misbehaving; templates for the rest
-        drafts[msg.external_id] = draft
-    return drafts
+        conv.history = [
+            *conv.history,
+            *(
+                {"at": now, "actor": a.name, "action": "picked up by agent"}
+                for a in picked
+            ),
+        ]
+        for a in picked:
+            counts[a.name] += 1
+    return counts
 
 
 def persist_messages(
@@ -250,7 +298,9 @@ def persist_messages(
     platform: str,
     messages: list[NormalisedMessage],
     config: TuningConfig,
-    ai: dict[str, "AIDraft"] | None = None,
+    agents: list[Agent] | None = None,
+    agent_counts: dict[str, int] | None = None,
+    added_ids: list[str] | None = None,
 ) -> int:
     """Insert only messages not already stored. Returns the number added."""
     if not messages:
@@ -258,14 +308,14 @@ def persist_messages(
 
     seen = _existing_external_ids(db, platform, [m.external_id for m in messages])
     added = 0
-    new_leads: list[Conversation] = []
 
     for msg in messages:
         if msg.external_id in seen:
             continue
         seen.add(msg.external_id)
-        row = normalise_to_conversation(msg, config, (ai or {}).get(msg.external_id))
-        db.add(row)
+        conv = normalise_to_conversation(msg, config)
+        picked = assign_agents([conv], agents) if agents else {}
+        db.add(conv)
         try:
             # Flush per row: one row violating a constraint must not discard
             # the whole batch.
@@ -275,15 +325,13 @@ def persist_messages(
             logger.info("Skipping duplicate %s:%s", platform, msg.external_id)
             continue
         added += 1
-        if row.intent in ("high", "medium") and not row.risk_flags:
-            new_leads.append(row)
+        if added_ids is not None:
+            added_ids.append(conv.id)
+        if agent_counts is not None:
+            for name, n in picked.items():
+                agent_counts[name] = agent_counts.get(name, 0) + n
 
     db.commit()
-    if new_leads:
-        from app.services import events_service
-
-        for row in new_leads:
-            events_service.emit("lead.discovered", events_service.lead_payload(row))
     return added
 
 
@@ -294,78 +342,69 @@ async def run_scan(db: Session, scan: ScanRun) -> ScanRun:
     abort the others: partial success has to be visible, or a dead token looks
     identical to a quiet channel.
     """
-    from app.core.redis import scan_lock
-
-    with scan_lock() as acquired:
-        if not acquired:
-            scan.status = "failed"
-            scan.error = "Another scan is already running. Try again when it finishes."
-            scan.finished_at = datetime.now(UTC)
-            db.commit()
-            return scan
-        await _run_scan_locked(db, scan)
-    from app.services import events_service
-
-    events_service.emit(
-        "scan.completed",
-        {"scanId": scan.id, "status": scan.status, "trigger": scan.trigger,
-         "examined": scan.examined, "discovered": scan.discovered,
-         "platforms": scan.platforms, "error": scan.error},
-    )
-    return scan
-
-
-async def _run_scan_locked(db: Session, scan: ScanRun) -> ScanRun:
     config = active_config()
-    connectors = build_connectors() + build_discovery_connectors(db)
+    connectors = build_connectors(db)
+    agents = enabled_engagement_agents(db)
+    agent_counts: dict[str, int] = {a.name: 0 for a in agents}
     outcomes: list[dict] = []
     total_examined = 0
     total_added = 0
+    new_ids: list[str] = []
 
     if not connectors:
         scan.status = "failed"
         scan.error = (
-            "No platform is connected. Set DISCORD_BOT_TOKEN, "
-            "TELEGRAM_BOT_TOKEN, REDDIT_CLIENT_ID/SECRET or YOUTUBE_API_KEY, "
-            "and PSEUDONYM_SALT in backend/.env."
+            "No platform is connected. Set DISCORD_BOT_TOKEN or "
+            "TELEGRAM_BOT_TOKEN and PSEUDONYM_SALT in backend/.env."
         )
         scan.finished_at = datetime.now(UTC)
+        db.add(
+            ActivityEntry(actor="system", action="scan failed", after=scan.error)
+        )
         db.commit()
         return scan
 
     for name, connector in connectors:
+        label = getattr(connector, "label", name)
         try:
             messages = await connector.fetch_messages(limit=50)
         except (DiscordError, TelegramError) as exc:
-            logger.warning("%s ingestion failed: %s", name, exc)
+            logger.warning("%s ingestion failed: %s", label, exc)
             outcomes.append(
-                {"platform": name, "examined": 0, "discovered": 0, "error": str(exc)}
+                {"platform": label, "examined": 0, "discovered": 0, "error": str(exc)}
             )
             continue
         except Exception as exc:  # noqa: BLE001 -- one connector must not kill the scan
-            logger.exception("%s ingestion crashed", name)
+            logger.exception("%s ingestion crashed", label)
             outcomes.append(
                 {
-                    "platform": name,
+                    "platform": label,
                     "examined": 0,
                     "discovered": 0,
-                    "error": repr(exc)[:200],
+                    "error": str(exc)[:200] or repr(exc)[:200],
                 }
             )
             continue
 
-        drafts = await ai_drafts_for(db, connector.platform, messages, config)
-        added = persist_messages(db, connector.platform, messages, config, drafts)
+        added = persist_messages(db, name, messages, config, agents, agent_counts, new_ids)
         total_examined += len(messages)
         total_added += added
-        outcomes.append(
-            {
-                "platform": name,
-                "examined": len(messages),
-                "discovered": added,
-                "error": None,
-            }
-        )
+        outcome = {
+            "platform": label,
+            "examined": len(messages),
+            "discovered": added,
+            "error": None,
+        }
+        poll = getattr(connector, "last_poll", None)
+        if poll:
+            outcome["received"] = poll
+            for event in poll.get("events", []):
+                db.add(
+                    ActivityEntry(
+                        actor=name, action=event["action"], item=event["chat"]
+                    )
+                )
+        outcomes.append(outcome)
 
     scan.status = "completed"
     scan.examined = total_examined
@@ -373,14 +412,99 @@ async def _run_scan_locked(db: Session, scan: ScanRun) -> ScanRun:
     scan.platforms = outcomes
     scan.finished_at = datetime.now(UTC)
 
-    if total_added:
+    # Every scan is recorded, including the ones that found nothing. A test
+    # message that "did nothing" has to leave a trace saying what the scan
+    # actually received, or there is no way to tell where it was lost.
+    db.add(
+        ActivityEntry(
+            actor="system",
+            action="scan completed",
+            item=f"{total_added} new conversation(s)",
+            after=scan_summary(outcomes, agent_counts),
+        )
+    )
+    for agent_name, count in agent_counts.items():
         db.add(
             ActivityEntry(
-                actor="system",
-                action="scan completed",
-                item=f"{total_added} new conversation(s)",
-                after=f"examined {total_examined}",
+                actor=agent_name[:64],
+                action="agent run",
+                item=f"{count} new conversation(s) picked up",
             )
         )
     db.commit()
+
+    # AI summaries and replies are written after the scan has been recorded,
+    # so a slow local model never holds the scan open.
+    from app.services import ai_drafts
+
+    ai_drafts.enrich_in_background(new_ids)
+    await notify_new_leads(db, new_ids)
     return scan
+
+
+async def notify_new_leads(db: Session, ids: list[str]) -> None:
+    """Post strong new leads to n8n, which can alert by email, Slack, etc."""
+    settings = get_settings()
+    if not ids or not settings.n8n_lead_webhook_url:
+        return
+    rows = db.execute(
+        select(Conversation).where(
+            Conversation.id.in_(ids),
+            Conversation.score >= settings.lead_alert_min_score,
+            Conversation.status == "new",
+        )
+    ).scalars().all()
+    if not rows:
+        return
+    payload = {
+        "count": len(rows),
+        "dashboard": f"{settings.public_base_url.rstrip('/')}/",
+        "leads": [
+            {
+                "id": r.id, "platform": r.platform, "community": r.community,
+                "score": r.score, "intent": r.intent, "summary": r.summary,
+                "message": r.message[:500], "url": r.source_url,
+            }
+            for r in rows
+        ],
+    }
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                settings.n8n_lead_webhook_url, json=payload,
+                headers={"X-Signal-Secret": settings.n8n_webhook_secret},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("n8n lead webhook failed: %s", exc)
+
+
+def scan_summary(outcomes: list[dict], agent_counts: dict[str, int]) -> str:
+    """One line per scan that explains an empty result rather than hiding it."""
+    parts: list[str] = []
+    for o in outcomes:
+        if o.get("error"):
+            parts.append(f"{o['platform']}: ERROR {o['error']}")
+            continue
+        poll = o.get("received")
+        if poll is None:
+            parts.append(f"{o['platform']}: {o['examined']} message(s)")
+            continue
+        text = (
+            f"{o['platform']}: {poll['updates']} update(s), "
+            f"{poll['textMessages']} text message(s)"
+        )
+        if poll["skippedNoText"]:
+            text += f", {poll['skippedNoText']} without text skipped"
+        if poll["chats"]:
+            text += f" from {', '.join(poll['chats'])}"
+        if not poll["updates"]:
+            text += (
+                " -- Telegram delivered nothing since the last scan. If the bot "
+                "is in a group, remove and re-add it so privacy-mode changes apply"
+            )
+        parts.append(text)
+    if not agent_counts:
+        parts.append("no engagement agent is enabled")
+    return "; ".join(parts)

@@ -303,7 +303,8 @@ def client(session_factory, monkeypatch):
             session.close()
 
     monkeypatch.setattr(
-        "app.api.routes.replies.build_connectors", lambda: [("discord", fake)]
+        "app.api.routes.replies.sender_for",
+        lambda platform: fake if platform == "discord" else None,
     )
     app.dependency_overrides[get_db] = override
     with TestClient(app) as test_client:

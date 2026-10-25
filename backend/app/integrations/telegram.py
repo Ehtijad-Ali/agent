@@ -30,6 +30,12 @@ API_ROOT = "https://api.telegram.org"
 # How many times a 429 is waited out before giving up.
 MAX_ATTEMPTS = 3
 
+# my_chat_member is the bot's own membership changing -- added to a group,
+# removed, promoted to admin. Without it the platform has no record that the
+# bot ever joined a group, so "the bot is in the group but nothing arrives"
+# cannot be told apart from "the bot was never added".
+ALLOWED_UPDATES = ["message", "channel_post", "my_chat_member"]
+
 
 def _retry_after(response: httpx.Response) -> float:
     """Seconds to wait from a 429.
@@ -52,6 +58,37 @@ def _retry_after(response: httpx.Response) -> float:
         return 1.0
 
 
+def _empty_poll() -> dict[str, Any]:
+    return {"updates": 0, "textMessages": 0, "skippedNoText": 0, "chats": [], "events": []}
+
+
+def _chat_label(chat: dict[str, Any]) -> str:
+    return (
+        chat.get("username") and f"@{chat['username']}"
+        or chat.get("title")
+        or str(chat.get("id"))
+    )
+
+
+def membership_event(update: dict[str, Any]) -> dict[str, str] | None:
+    """Describe a my_chat_member update in operator terms, or None."""
+    change = update.get("my_chat_member")
+    if not change:
+        return None
+    chat = change.get("chat") or {}
+    old = (change.get("old_chat_member") or {}).get("status", "")
+    new = (change.get("new_chat_member") or {}).get("status", "")
+    if new in ("member", "administrator") and old in ("left", "kicked", ""):
+        action = "bot added to group"
+    elif new in ("left", "kicked"):
+        action = "bot removed from group"
+    elif new == "administrator":
+        action = "bot promoted to admin"
+    else:
+        action = f"bot membership changed ({old} -> {new})"
+    return {"action": action, "chat": _chat_label(chat)}
+
+
 class TelegramError(RuntimeError):
     """Telegram returned ok:false, or the transport failed."""
 
@@ -68,6 +105,10 @@ class TelegramConnector(PlatformConnector):
         # getUpdates is a cursor: acknowledging offset N drops everything below
         # it server-side, which is what stops the same message being reprocessed.
         self._offset: int | None = None
+        # What the last poll actually saw, including what it dropped. The scan
+        # records this so an empty Inbox can be explained from the platform
+        # itself rather than guessed at.
+        self.last_poll: dict[str, Any] = _empty_poll()
 
     # -- internals ---------------------------------------------------------
 
@@ -160,6 +201,31 @@ class TelegramConnector(PlatformConnector):
                 "mention it. Disable it in BotFather: /setprivacy -> Disable, "
                 "then remove and re-add the bot to each group."
             )
+        else:
+            # The API reports the current setting, but Telegram applies it
+            # per group at the moment the bot joins. A bot added before privacy
+            # was disabled keeps the old behaviour in that group.
+            detail += (
+                " Privacy mode is off. Groups the bot joined before it was "
+                "turned off still need the bot removed and re-added."
+            )
+        # A webhook and getUpdates are mutually exclusive: while one is set,
+        # every poll fails with 409 Conflict and nothing is ingested.
+        try:
+            hook = await self._call("getWebhookInfo")
+        except TelegramError:
+            hook = {}
+        if hook.get("url"):
+            return ConnectionStatus(
+                platform="telegram",
+                status="error",
+                last_checked=now,
+                detail=detail,
+                error=(
+                    "A webhook is set on this bot, which blocks polling. "
+                    "Remove it (deleteWebhook) or nothing will be received."
+                ),
+            )
         return ConnectionStatus(
             platform="telegram",
             status="connected",
@@ -173,22 +239,37 @@ class TelegramConnector(PlatformConnector):
         params: dict[str, Any] = {
             "limit": min(limit, 100),
             "timeout": 0,
-            "allowed_updates": ["message", "channel_post"],
+            "allowed_updates": ALLOWED_UPDATES,
         }
         if self._offset is not None:
             params["offset"] = self._offset
 
+        self.last_poll = _empty_poll()
         updates = await self._call("getUpdates", **params)
 
+        poll = self.last_poll
+        chats: set[str] = set()
         messages: list[NormalisedMessage] = []
         for update in updates:
             self._offset = update["update_id"] + 1
+            poll["updates"] += 1
+
+            event = membership_event(update)
+            if event is not None:
+                poll["events"].append(event)
+                continue
+
             raw = update.get("message") or update.get("channel_post")
             if raw is None:
                 continue
+            chats.add(_chat_label(raw.get("chat") or {}))
             normalised = self.normalise_message(raw)
-            if normalised is not None:
-                messages.append(normalised)
+            if normalised is None:
+                poll["skippedNoText"] += 1
+                continue
+            poll["textMessages"] += 1
+            messages.append(normalised)
+        poll["chats"] = sorted(chats)
         return messages
 
     async def send_message(self, chat_id: str, text: str, reply_to: str | None = None) -> str:
@@ -222,12 +303,7 @@ class TelegramConnector(PlatformConnector):
         # pseudonymisation still has a stable subject.
         author_id = str(author.get("id") or f"chat{chat.get('id')}")
 
-        community = (
-            chat.get("username")
-            and f"@{chat['username']}"
-            or chat.get("title")
-            or str(chat.get("id"))
-        )
+        community = _chat_label(chat)
 
         source_url = None
         if chat.get("username") and raw.get("message_id"):
@@ -256,7 +332,7 @@ class TelegramConnector(PlatformConnector):
             "setWebhook",
             url=url,
             secret_token=secret_token,
-            allowed_updates=["message", "channel_post"],
+            allowed_updates=ALLOWED_UPDATES,
         )
         return True
 

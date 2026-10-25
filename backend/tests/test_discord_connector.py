@@ -116,3 +116,51 @@ class TestErrorMapping:
         response = httpx.Response(status, headers={"Retry-After": "5"})
         with pytest.raises(DiscordError, match=expected):
             DiscordConnector._handle(response, "GET /test")
+
+
+class TestInviteAndOverview:
+    def test_invite_url_requests_only_read_and_send(self):
+        from app.integrations.discord import DiscordConnector
+
+        url = DiscordConnector.invite_url("123")
+        assert url.startswith("https://discord.com/oauth2/authorize?client_id=123")
+        assert "scope=bot" in url
+        assert "permissions=68608" in url  # view + send + read history
+
+    def test_overview_marks_blocked_channels(self, monkeypatch):
+        import asyncio
+
+        from app.integrations.discord import DiscordConnector, DiscordError
+
+        connector = DiscordConnector("fake", "salt")
+
+        async def fake_get(path, **params):
+            if path == "/users/@me/guilds":
+                return [{"id": "g1", "name": "Server"}]
+            if path == "/guilds/g1/channels":
+                return [
+                    {"id": "c1", "name": "general", "type": 0},
+                    {"id": "c2", "name": "staff", "type": 0},
+                    {"id": "v1", "name": "voice", "type": 2},
+                ]
+            if path == "/channels/c2/messages":
+                raise DiscordError("forbidden")
+            return []
+
+        monkeypatch.setattr(connector, "_get", fake_get)
+        servers = asyncio.run(connector.server_overview())
+        assert servers[0]["name"] == "Server"
+        assert servers[0]["channels"] == [
+            {"id": "c1", "name": "general", "readable": True},
+            {"id": "c2", "name": "staff", "readable": False},
+        ]
+
+
+def test_platforms_route_without_token_says_so():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    body = TestClient(app).get("/api/platforms/discord").json()
+    assert body["connected"] is False
+    assert "DISCORD_BOT_TOKEN" in body["error"]

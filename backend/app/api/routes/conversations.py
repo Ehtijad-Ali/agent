@@ -165,16 +165,6 @@ def _terminal_refusal(row: Conversation) -> str | None:
     return None
 
 
-def _emit_status(row: Conversation, before: str) -> None:
-    if row.status != before:
-        from app.services import events_service
-
-        events_service.emit(
-            "lead.status_changed",
-            {**events_service.lead_payload(row), "before": before, "after": row.status},
-        )
-
-
 def _record(db: Session, row: Conversation, action: str, before: str, after: str) -> None:
     """Append to the conversation's own history and the global audit log.
 
@@ -230,56 +220,6 @@ def edit_reply(
     return ConversationOut.model_validate(row)
 
 
-@router.post("/{conversation_id}/ai-draft", response_model=ConversationOut)
-async def ai_redraft(
-    conversation_id: str,
-    db: Session = Depends(get_db),
-) -> ConversationOut:
-    """Rewrite the summary and reply drafts with the local AI model.
-
-    Replaces the drafts and clears any manual edit, so it is refused once a
-    reply has been sent, and for risk-flagged rows, which never get a draft.
-    """
-    from app.api.routes.engine import get_active_config
-    from app.services import ai_service
-    from app.services.reply_service import detect_language
-
-    row = _get_or_404(db, conversation_id)
-    refusal = _terminal_refusal(row)
-    if refusal:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
-    if row.risk_flags:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This conversation carries risk flags, so no reply may be drafted.",
-        )
-    if not ai_service.enabled():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI drafting is off: set OLLAMA_MODEL on the server.",
-        )
-
-    draft = await ai_service.draft(
-        row.message, row.community, get_active_config().voice, detect_language(row.message)
-    )
-    if draft is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The AI model did not answer. Check that Ollama is running, then try again.",
-        )
-
-    row.reply_variants = draft.variants
-    row.selected_variant = 0
-    row.edited_reply = None
-    row.language = draft.language
-    if draft.summary:
-        row.summary = draft.summary
-    _record(db, row, "AI redrafted replies", "", "")
-    db.commit()
-    db.refresh(row)
-    return ConversationOut.model_validate(row)
-
-
 @router.post("/bulk", response_model=BulkActionResponse)
 def bulk_action(
     request: BulkActionRequest, db: Session = Depends(get_db)
@@ -296,7 +236,6 @@ def bulk_action(
         )
 
     results: list[BulkActionResult] = []
-    changed: list[tuple[Conversation, str]] = []
     updated = 0
     for conversation_id in request.ids:
         row = db.get(Conversation, conversation_id)
@@ -316,11 +255,8 @@ def bulk_action(
         _record(db, row, request.action.replace("-", " "), before, new_status)
         results.append(BulkActionResult(id=conversation_id, ok=True))
         updated += 1
-        changed.append((row, before))
 
     db.commit()
-    for row, before in changed:
-        _emit_status(row, before)
     return BulkActionResponse(results=results, updated=updated)
 
 
@@ -355,5 +291,4 @@ def act_on_conversation(
     _record(db, row, action.replace("-", " "), before, new_status)
     db.commit()
     db.refresh(row)
-    _emit_status(row, before)
     return ConversationOut.model_validate(row)
