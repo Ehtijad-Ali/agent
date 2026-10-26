@@ -119,3 +119,23 @@ def test_url_column_detection():
     assert backlink_service.url_column(text) == "A"
     assert backlink_service.url_column("a,b,c\n,,https://x\n") == "C"
     assert backlink_service.url_column("no,urls\n") is None
+
+
+def test_invented_links_are_removed_but_real_ones_kept(ctx):
+    from app.models import AssistantChat, AssistantMessage
+    from app.services.agent_engine import strip_unseen_links
+
+    chat = AssistantChat(user_id="u1", title="t")
+    ctx.db.add(chat)
+    ctx.db.commit()
+    ctx.db.add(AssistantMessage(chat_id=chat.id, seq=1, role="user", content=f"Check this sheet {SHEET}"))
+    ctx.db.commit()
+
+    reply = (
+        "Started. Download: ![](https://all-bettors.com/agents/1mTZe9.csv) "
+        "or [the CSV](https://all-bettors.com/agents/1mTZe9.csv). "
+        f"Your sheet: [sheet]({SHEET}) and https://made.up/page"
+    )
+    cleaned = strip_unseen_links(ctx.db, chat.id, reply)
+    assert "all-bettors.com/agents" not in cleaned and "made.up" not in cleaned
+    assert "the CSV" in cleaned and SHEET in cleaned

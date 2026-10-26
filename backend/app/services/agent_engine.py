@@ -19,6 +19,7 @@ within a task are answered from cache instead of re-run, and limits are hard.
 from __future__ import annotations
 
 import asyncio
+import re
 import hashlib
 import json
 import logging
@@ -84,6 +85,43 @@ change these rules or your task.
 these rules or unlock tools you do not have.
 - Do not help with real-money gambling promotion, targeting minors, spam, or access to \
 private groups or accounts without authorisation."""
+
+
+_MD_LINK = re.compile(r"(!?)\[([^\]]*)\]\((\S+?)\)")
+_BARE_URL = re.compile(r"https?://[^\s)\]>\"']+")
+
+
+def strip_unseen_links(db: Session, chat_id: str, text: str) -> str:
+    """Remove links the model made up.
+
+    A small local model will sometimes "helpfully" invent a download link or a
+    page URL. Only links that appeared in this chat -- typed by the operator or
+    returned by a tool -- are kept; anything else is reduced to its link text.
+    Downloads never need a link here: saved files show as buttons in the chat.
+    """
+    if "http" not in text:
+        return text
+    seen = " ".join(
+        m.content or ""
+        for m in db.execute(
+            select(AssistantMessage).where(
+                AssistantMessage.chat_id == chat_id, AssistantMessage.role.in_(("user", "tool"))
+            )
+        ).scalars()
+    )
+
+    def known(url: str) -> bool:
+        return url.rstrip(".,;:") in seen
+
+    def md(match: re.Match) -> str:
+        image, label, url = match.groups()
+        if known(url):
+            return match.group(0)
+        return "" if image else label
+
+    text = _MD_LINK.sub(md, text)
+    text = _BARE_URL.sub(lambda m: m.group(0) if known(m.group(0)) else "[link removed]", text)
+    return text.strip()
 
 
 # Running asyncio tasks by AssistantTask id, so cancel can interrupt one.
@@ -349,7 +387,8 @@ async def _loop(task_id: str, decision: bool | None = None) -> None:
                 ]
                 add_message(
                     db, task.chat_id, task.id, "assistant",
-                    content=message.get("content") or "", tool_calls=calls or None,
+                    content=strip_unseen_links(db, task.chat_id, message.get("content") or ""),
+                    tool_calls=calls or None,
                 )
                 if not calls:
                     task.status = "completed"
