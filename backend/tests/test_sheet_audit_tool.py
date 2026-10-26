@@ -161,3 +161,25 @@ def test_rate_limited_pages_are_retried(monkeypatch):
 
 def test_subdomains_share_one_site_limit():
     assert backlink_service._site("https://a.blogzet.com/x") == backlink_service._site("https://b.blogzet.com/y")
+
+
+def test_still_limited_pages_get_a_slow_final_pass(monkeypatch):
+    attempts: dict[int, int] = {}
+
+    async def network(client, row, url, domain):
+        attempts[row] = attempts.get(row, 0) + 1
+        # Row 2 stays limited through the normal retries, then succeeds.
+        if row == 2 and attempts[row] <= 3:
+            return backlink_service.CheckResult(row, url, "error", http_status=429)
+        return backlink_service.CheckResult(row, url, "dofollow", http_status=200)
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(backlink_service, "check_page", network)
+    monkeypatch.setattr(backlink_service.asyncio, "sleep", no_wait)
+    results = asyncio.run(backlink_service.audit(
+        [(1, "https://a.example/1"), (2, "https://b.example/2")], "all-bettors.com"
+    ))
+    assert [r.result for r in results] == ["dofollow", "dofollow"]
+    assert attempts[2] == 4

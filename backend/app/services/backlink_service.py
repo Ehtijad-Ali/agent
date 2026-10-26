@@ -305,6 +305,7 @@ async def check_page(
 RETRY_STATUSES = (429, 503)
 RETRY_DELAYS = (5.0, 15.0)
 PER_SITE = 2
+SLOW_PASS_PAUSE = 3.0
 
 
 def _site(url: str) -> str:
@@ -336,7 +337,16 @@ async def audit(urls: list[tuple[int, str]], domain: str) -> list[CheckResult]:
                     break
             return result
 
-        return await asyncio.gather(*(one(r, u) for r, u in urls))
+        results = list(await asyncio.gather(*(one(r, u) for r, u in urls)))
+
+        # Many "sites" in one sheet can be the same blog network, which limits
+        # requests per visitor IP across all of them. Whatever is still rate
+        # limited gets one slow, one-at-a-time pass at the end.
+        for index, result in enumerate(results):
+            if result.http_status in RETRY_STATUSES:
+                await asyncio.sleep(SLOW_PASS_PAUSE)
+                results[index] = await check_page(client, result.row, result.page_url, domain)
+        return results
 
 
 def results_csv(rows: list) -> str:
