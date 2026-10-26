@@ -299,8 +299,25 @@ async def check_page(
     return CheckResult(row=row, page_url=url, http_status=status, **verdict)
 
 
+# Pages that answer "too many requests" or "busy" are retried after these
+# pauses. Hosting networks such as blogzet/ezblogz serve thousands of the
+# sheet's URLs, and hammering them turns real results into errors.
+RETRY_STATUSES = (429, 503)
+RETRY_DELAYS = (5.0, 15.0)
+PER_SITE = 2
+
+
+def _site(url: str) -> str:
+    """The registrable part of a host (blog.example.com -> example.com), so
+    every subdomain of one hosting network shares a limit."""
+    host = (urlparse(url).hostname or "").lower()
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
 async def audit(urls: list[tuple[int, str]], domain: str) -> list[CheckResult]:
     semaphore = asyncio.Semaphore(CONCURRENCY)
+    per_site: dict[str, asyncio.Semaphore] = {}
     async with httpx.AsyncClient(
         timeout=FETCH_TIMEOUT,
         follow_redirects=True,
@@ -308,8 +325,16 @@ async def audit(urls: list[tuple[int, str]], domain: str) -> list[CheckResult]:
     ) as client:
 
         async def one(row: int, url: str) -> CheckResult:
-            async with semaphore:
-                return await check_page(client, row, url, domain)
+            site = per_site.setdefault(_site(url), asyncio.Semaphore(PER_SITE))
+            result = CheckResult(row, url, "error", detail="Not checked.")
+            for pause in (0.0, *RETRY_DELAYS):
+                if pause:
+                    await asyncio.sleep(pause)
+                async with site, semaphore:
+                    result = await check_page(client, row, url, domain)
+                if result.http_status not in RETRY_STATUSES:
+                    break
+            return result
 
         return await asyncio.gather(*(one(r, u) for r, u in urls))
 

@@ -139,3 +139,25 @@ def test_invented_links_are_removed_but_real_ones_kept(ctx):
     cleaned = strip_unseen_links(ctx.db, chat.id, reply)
     assert "all-bettors.com/agents" not in cleaned and "made.up" not in cleaned
     assert "the CSV" in cleaned and SHEET in cleaned
+
+
+def test_rate_limited_pages_are_retried(monkeypatch):
+    calls: list[int] = []
+
+    async def flaky(client, row, url, domain):
+        calls.append(row)
+        if len(calls) < 3:
+            return backlink_service.CheckResult(row, url, "error", http_status=429, detail="HTTP 429")
+        return backlink_service.CheckResult(row, url, "dofollow", http_status=200)
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(backlink_service, "check_page", flaky)
+    monkeypatch.setattr(backlink_service.asyncio, "sleep", no_wait)
+    [result] = asyncio.run(backlink_service.audit([(1, "https://a.blogzet.com/x")], "all-bettors.com"))
+    assert result.result == "dofollow" and len(calls) == 3
+
+
+def test_subdomains_share_one_site_limit():
+    assert backlink_service._site("https://a.blogzet.com/x") == backlink_service._site("https://b.blogzet.com/y")
