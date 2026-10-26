@@ -384,7 +384,9 @@ async def start_backlink_audit(ctx: ToolContext, args: StartAuditArgs) -> dict:
     from app.models import Agent
 
     try:
-        backlink_service.sheet_csv_url(args.sheet_url)
+        # Read once now: it checks the sheet is shared, and finds the URL
+        # column even when the model guessed the wrong one.
+        column, urls = await backlink_service.read_sheet_detecting(args.sheet_url, args.column)
     except backlink_service.BacklinkError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -397,14 +399,15 @@ async def start_backlink_audit(ctx: ToolContext, args: StartAuditArgs) -> dict:
             agent_type="backlink_audit",
             description=f"Started from the AI Agent by {ctx.user_name}.",
             enabled=1,
-            rules={"sheetUrl": args.sheet_url, "urlColumn": args.column.upper(),
+            rules={"sheetUrl": args.sheet_url, "urlColumn": column,
                    "targetDomain": domain, "maxUrls": 10000, "resultColumn": "B"},
         )
         ctx.db.add(agent)
         ctx.db.commit()
         ctx.db.refresh(agent)
-    elif not agent.enabled:
+    else:
         agent.enabled = 1
+        agent.rules = {**(agent.rules or {}), "urlColumn": column}
         ctx.db.commit()
 
     if agents_route.audit_running(agent.id):
@@ -415,6 +418,8 @@ async def start_backlink_audit(ctx: ToolContext, args: StartAuditArgs) -> dict:
     asyncio.get_running_loop().create_task(agents_route._run_audit(agent.id), name=f"audit-{agent.id}")
     return {
         "started": True,
+        "urls": len(urls),
+        "column": column,
         "agent": agent.name,
         "where": f"Agents page -> {agent.name}: live progress, results, Download CSV",
         "note": "Runs in the background; it does not need this chat to stay open.",

@@ -115,7 +115,31 @@ def urls_from_csv(text: str, column: str = "A") -> list[tuple[int, str]]:
     return out
 
 
+def url_column(text: str) -> str | None:
+    """The column letter holding the most URLs, or None if there are none."""
+    counts: dict[int, int] = {}
+    for row in csv.reader(io.StringIO(text)):
+        for index, cell in enumerate(row):
+            if cell.strip().lower().startswith(("http://", "https://")):
+                counts[index] = counts.get(index, 0) + 1
+    if not counts:
+        return None
+    best = max(counts, key=counts.get)
+    letters = ""
+    best += 1
+    while best:
+        best, rem = divmod(best - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
 async def read_sheet(sheet_url: str, column: str = "A") -> list[tuple[int, str]]:
+    return (await read_sheet_detecting(sheet_url, column))[1]
+
+
+async def read_sheet_detecting(sheet_url: str, column: str = "A") -> tuple[str, list[tuple[int, str]]]:
+    """Like read_sheet, but if ``column`` holds no URLs the column that does is
+    used instead (a mistyped column, or an AI guess). Returns (column, urls)."""
     export = sheet_csv_url(sheet_url)
     async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
         try:
@@ -132,8 +156,11 @@ async def read_sheet(sheet_url: str, column: str = "A") -> list[tuple[int, str]]
         )
     urls = urls_from_csv(response.text, column)
     if not urls:
-        raise BacklinkError(f"No URLs found in column {column.upper()} of the sheet.")
-    return urls
+        found = url_column(response.text)
+        if found is None:
+            raise BacklinkError("No URLs found in the sheet.")
+        column, urls = found, urls_from_csv(response.text, found)
+    return column.upper(), urls
 
 
 # -- one page ----------------------------------------------------------------

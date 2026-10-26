@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.routes import agents as agents_route
 from app.db.session import Base
 from app.models import Agent, BacklinkCheck
-from app.services import agent_tools
+from app.services import agent_tools, backlink_service
 
 SHEET = "https://docs.google.com/spreadsheets/d/1mTZe9_Zf6f5BMmtAsxElW80boI5/edit?usp=sharing"
 
@@ -37,7 +37,13 @@ def launched(monkeypatch):
     async def fake_run(agent_id: str) -> None:
         started.append(agent_id)
 
+    async def fake_read(sheet_url: str, column: str = "A"):
+        if "/spreadsheets/d/" not in sheet_url:
+            raise backlink_service.BacklinkError("That is not a Google Sheets link.")
+        return "A", [(1, "https://a.example/1"), (2, "https://a.example/2")]
+
     monkeypatch.setattr(agents_route, "_run_audit", fake_run)
+    monkeypatch.setattr(backlink_service, "read_sheet_detecting", fake_read)
     return started
 
 
@@ -100,3 +106,16 @@ def test_not_a_sheet_link_is_refused(ctx, launched):
 def test_inline_checks_are_capped_small():
     with pytest.raises(Exception):
         agent_tools.CheckBacklinksArgs(sheet_url=SHEET, limit=500)
+
+
+def test_a_wrong_column_guess_still_finds_the_urls(ctx, launched):
+    result = _start(ctx, column="B")  # the model guessed B; the URLs are in A
+    assert result["column"] == "A" and result["urls"] == 2
+    assert ctx.db.query(Agent).one().rules["urlColumn"] == "A"
+
+
+def test_url_column_detection():
+    text = "Page,Result\nhttps://x.example/1,\nhttps://x.example/2,dofollow\n"
+    assert backlink_service.url_column(text) == "A"
+    assert backlink_service.url_column("a,b,c\n,,https://x\n") == "C"
+    assert backlink_service.url_column("no,urls\n") is None
