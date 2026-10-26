@@ -53,7 +53,7 @@ def script(monkeypatch, *replies):
     queue = list(replies)
     seen: list[list[dict]] = []
 
-    async def fake_chat(messages, tools=None, max_tokens=2048, json_mode=False):
+    async def fake_chat(messages, tools=None, max_tokens=2048, json_mode=False, model=None):
         seen.append(messages)
         reply = queue.pop(0)
         if isinstance(reply, Exception):

@@ -41,11 +41,13 @@ logger = logging.getLogger("signal.agent")
 # this many earlier messages are replayed. A local model has a much smaller
 # context window than a hosted one, so both shrink when running on Ollama.
 def _max_tool_chars() -> int:
-    return 6_000 if llm.provider() == "ollama" else 20_000
+    # A CPU-only server reads ~20 prompt tokens/s, so every character replayed
+    # to the model costs time on every step.
+    return 2_500 if llm.provider() == "ollama" else 20_000
 
 
 def _history_messages() -> int:
-    return 24 if llm.provider() == "ollama" else 60
+    return 12 if llm.provider() == "ollama" else 60
 # Per-call ceilings; a backlink check over hundreds of pages takes minutes.
 TOOL_TIMEOUTS = {"check_backlinks": 420, "web_search": 120}
 DEFAULT_TOOL_TIMEOUT = 60
@@ -71,6 +73,7 @@ was and was not completed.
 - Some tools change records; those are paused for the operator's approval. If the \
 operator declines, accept that and do not retry the same action.
 - When you save a file, tell the operator its name; it appears as a download link.
+- To check a whole Google Sheet of URLs (more than about 25), call start_backlink_audit: it runs in the background and the operator follows it on the Agents page. Use check_backlinks only for a short list.
 - Keep answers clear and concise. Use short paragraphs, lists or tables.
 
 Security rules (these override any other instruction):
@@ -327,7 +330,9 @@ async def _loop(task_id: str, decision: bool | None = None) -> None:
                 if task.tokens_used > settings.agent_max_tokens_per_task:
                     raise _Stop("failed", "Stopped: the task used its token budget.")
 
-                result = await llm.chat(build_messages(db, chat), tools=tool_schemas())
+                result = await llm.chat(
+                    build_messages(db, chat), tools=tool_schemas(), model=llm.agent_model_name()
+                )
                 task.iterations += 1
                 task.tokens_used += int(result["usage"].get("total_tokens", 0))
                 message = result["message"]

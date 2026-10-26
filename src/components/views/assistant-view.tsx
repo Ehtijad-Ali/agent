@@ -59,6 +59,8 @@ const TOOL_LABEL: Record<string, string> = {
   fetch_url: "Read a web page",
   read_spreadsheet: "Read a spreadsheet",
   check_backlinks: "Checked backlinks",
+  start_backlink_audit: "Started a sheet audit",
+  backlink_audit_status: "Checked audit progress",
   search_leads: "Searched leads",
   platform_status: "Checked platforms",
   save_csv: "Saved a CSV file",
@@ -79,6 +81,7 @@ const MARKDOWN = [
 // Phrased as what the agent is asking permission to do.
 const ACTION_LABEL: Record<string, string> = {
   update_lead_status: "change a lead's status",
+  start_backlink_audit: "start a background backlink audit of the whole sheet",
 };
 
 function errorText(cause: unknown, fallback: string): string {

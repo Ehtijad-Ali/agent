@@ -44,6 +44,14 @@ def model_name() -> str:
     return settings.groq_model if provider() == "groq" else settings.ollama_model
 
 
+def agent_model_name() -> str:
+    """The model the AI Agent chat runs on."""
+    settings = get_settings()
+    if provider() == "groq":
+        return settings.groq_model
+    return settings.ollama_agent_model or settings.ollama_model
+
+
 def is_configured() -> bool:
     settings = get_settings()
     if provider() == "groq":
@@ -62,12 +70,14 @@ async def chat(
     tools: list[dict[str, Any]] | None = None,
     max_tokens: int = 2048,
     json_mode: bool = False,
+    model: str | None = None,
 ) -> dict[str, Any]:
+    """``model`` overrides OLLAMA_MODEL for this call (Ollama only)."""
     if provider() == "groq":
         from app.services import groq_client
 
         return await groq_client.chat(messages, tools=tools, max_tokens=max_tokens)
-    return await _ollama_chat(messages, tools, max_tokens, json_mode)
+    return await _ollama_chat(messages, tools, max_tokens, json_mode, model)
 
 
 # -- Ollama --------------------------------------------------------------------
@@ -105,13 +115,14 @@ async def _ollama_chat(
     tools: list[dict[str, Any]] | None,
     max_tokens: int,
     json_mode: bool,
+    model: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     if not settings.ollama_model:
         raise LLMError(not_configured_reason())
 
     payload: dict[str, Any] = {
-        "model": settings.ollama_model,
+        "model": model or settings.ollama_model,
         "messages": _to_ollama(messages),
         "stream": False,
         "keep_alive": "30m",

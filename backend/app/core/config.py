@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # Context window. Ollama's default is small enough to cut off tool results
     # without an error, so it is set explicitly.
     ollama_context: int = 8192
+    # Model for the AI Agent chat. Blank = OLLAMA_MODEL. A smaller model (e.g.
+    # qwen2.5:3b) answers about twice as fast on a CPU-only server; background
+    # reply drafts keep using OLLAMA_MODEL.
+    ollama_agent_model: str = ""
 
     # Which model serves the AI Agent and AI drafts: "ollama" or "groq".
     ai_provider: str = "ollama"

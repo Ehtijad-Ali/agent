@@ -78,7 +78,7 @@ def assistant_status() -> dict:
     return {
         "configured": llm.is_configured(),
         "provider": llm.provider(),
-        "model": llm.model_name(),
+        "model": llm.agent_model_name(),
         "tools": [
             ToolInfo(
                 name=t.name, description=t.description, requires_approval=t.requires_approval

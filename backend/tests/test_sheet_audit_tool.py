@@ -1,0 +1,102 @@
+"""The AI Agent hands whole-sheet backlink checks to the background audit
+instead of running them inside the (slow, local) model loop."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.api.routes import agents as agents_route
+from app.db.session import Base
+from app.models import Agent, BacklinkCheck
+from app.services import agent_tools
+
+SHEET = "https://docs.google.com/spreadsheets/d/1mTZe9_Zf6f5BMmtAsxElW80boI5/edit?usp=sharing"
+
+
+@pytest.fixture
+def ctx():
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, expire_on_commit=False)()
+    yield agent_tools.ToolContext(db=db, user_id="u1", user_name="Sergio", chat_id="c1", task_id="t1")
+    db.close()
+    agents_route._audits.clear()
+
+
+@pytest.fixture
+def launched(monkeypatch):
+    started: list[str] = []
+
+    async def fake_run(agent_id: str) -> None:
+        started.append(agent_id)
+
+    monkeypatch.setattr(agents_route, "_run_audit", fake_run)
+    return started
+
+
+def _start(ctx, **args):
+    async def go():
+        result = await agent_tools.start_backlink_audit(
+            ctx, agent_tools.StartAuditArgs(sheet_url=SHEET, **args)
+        )
+        await asyncio.sleep(0)  # let the scheduled background task run
+        return result
+
+    return asyncio.run(go())
+
+
+def test_starting_an_audit_needs_approval():
+    assert agent_tools.TOOLS["start_backlink_audit"].requires_approval is True
+    assert agent_tools.TOOLS["backlink_audit_status"].requires_approval is False
+
+
+def test_whole_sheet_goes_to_a_background_audit_agent(ctx, launched):
+    result = _start(ctx)
+    assert result["started"] is True
+    agent = ctx.db.query(Agent).one()
+    assert agent.agent_type == "backlink_audit" and agent.enabled
+    assert agent.rules["sheetUrl"] == SHEET and agent.rules["targetDomain"] == "all-bettors.com"
+    assert launched == [agent.id]
+    assert agents_route.audit_running(agent.id)
+
+
+def test_a_running_audit_is_not_started_twice(ctx, launched):
+    _start(ctx)
+    again = _start(ctx)
+    assert again["started"] is False and again["status"] == "already running"
+    assert ctx.db.query(Agent).count() == 1 and len(launched) == 1
+
+
+def test_status_reports_progress_and_results(ctx, launched):
+    _start(ctx)
+    agent = ctx.db.query(Agent).one()
+    agents_route._audits[agent.id].update(status="completed", done=2, total=2)
+    for row, result in ((2, "dofollow"), (3, "nofollow")):
+        ctx.db.add(BacklinkCheck(agent_id=agent.id, row=row, page_url=f"https://x/{row}", result=result))
+    ctx.db.commit()
+
+    status = asyncio.run(agent_tools.backlink_audit_status(
+        ctx, agent_tools.AuditStatusArgs(sheet_url=SHEET)
+    ))
+    assert status["status"] == "completed"
+    assert status["results"] == {"dofollow": 1, "nofollow": 1}
+
+
+def test_not_a_sheet_link_is_refused(ctx, launched):
+    with pytest.raises(agent_tools.ToolError):
+        asyncio.run(agent_tools.start_backlink_audit(
+            ctx, agent_tools.StartAuditArgs(sheet_url="https://example.com/list")
+        ))
+    assert launched == []
+
+
+def test_inline_checks_are_capped_small():
+    with pytest.raises(Exception):
+        agent_tools.CheckBacklinksArgs(sheet_url=SHEET, limit=500)

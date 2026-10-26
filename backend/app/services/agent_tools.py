@@ -310,7 +310,10 @@ class CheckBacklinksArgs(BaseModel):
     urls: list[str] | None = Field(
         default=None, description="Page URLs to check, if not reading them from a sheet."
     )
-    limit: int = Field(default=200, ge=1, le=500, description="Maximum pages to check.")
+    limit: int = Field(
+        default=25, ge=1, le=50,
+        description="Maximum pages to check here. For a whole sheet use start_backlink_audit.",
+    )
 
 
 async def check_backlinks(ctx: ToolContext, args: CheckBacklinksArgs) -> dict:
@@ -340,16 +343,110 @@ async def check_backlinks(ctx: ToolContext, args: CheckBacklinksArgs) -> dict:
         "available_in_source": total,
         "counts": counts,
         "sample": [
-            {"row": r.row, "url": r.page_url, "result": r.result, "detail": r.detail}
-            for r in results[:15]
+            {"row": r.row, "url": r.page_url, "result": r.result}
+            for r in results[:8]
         ],
         "file": saved,
         "note": (
-            f"Only the first {args.limit} of {total} were checked; for the full "
-            "list use the 'Audit backlinks' agent on the Agents page."
+            f"Only the first {args.limit} of {total} were checked. To check all "
+            f"{total}, call start_backlink_audit with the same sheet."
             if total > args.limit
             else "All URLs were checked."
         ),
+    }
+
+
+class StartAuditArgs(BaseModel):
+    sheet_url: str = Field(description="Google Sheet link whose column holds the page URLs.")
+    target_domain: str = Field(default="all-bettors.com", description="Domain the pages should link to.")
+    column: str = Field(default="A", max_length=3, description="Sheet column with the URLs.")
+
+
+def _sheet_agent(ctx: ToolContext, sheet_url: str, domain: str):
+    """The backlink-audit agent for this sheet and domain, if one exists."""
+    from app.models import Agent
+
+    for agent in ctx.db.execute(select(Agent).where(Agent.agent_type == "backlink_audit")).scalars():
+        rules = agent.rules or {}
+        if rules.get("sheetUrl") == sheet_url and rules.get("targetDomain", "all-bettors.com") == domain:
+            return agent
+    return None
+
+
+async def start_backlink_audit(ctx: ToolContext, args: StartAuditArgs) -> dict:
+    """Hand a whole sheet to the background audit instead of checking it in chat.
+
+    Checking thousands of pages takes minutes and needs no AI per page, so it
+    runs as an "Audit backlinks" agent: progress, the results table, the CSV
+    and "Write to sheet" are all on the Agents page.
+    """
+    from app.api.routes import agents as agents_route
+    from app.models import Agent
+
+    try:
+        backlink_service.sheet_csv_url(args.sheet_url)
+    except backlink_service.BacklinkError as exc:
+        raise ToolError(str(exc)) from exc
+
+    domain = args.target_domain.strip().lower().removeprefix("www.") or "all-bettors.com"
+    agent = _sheet_agent(ctx, args.sheet_url, domain)
+    if agent is None:
+        match = re.search(r"/d/([a-zA-Z0-9_-]{6})", args.sheet_url)
+        agent = Agent(
+            name=f"Sheet audit {match.group(1) if match else datetime.now(UTC).strftime('%m%d%H%M')}"[:120],
+            agent_type="backlink_audit",
+            description=f"Started from the AI Agent by {ctx.user_name}.",
+            enabled=1,
+            rules={"sheetUrl": args.sheet_url, "urlColumn": args.column.upper(),
+                   "targetDomain": domain, "maxUrls": 10000, "resultColumn": "B"},
+        )
+        ctx.db.add(agent)
+        ctx.db.commit()
+        ctx.db.refresh(agent)
+    elif not agent.enabled:
+        agent.enabled = 1
+        ctx.db.commit()
+
+    if agents_route.audit_running(agent.id):
+        return {"started": False, "agent": agent.name, "status": "already running",
+                "where": "Agents page"}
+
+    agents_route.begin_audit(ctx.db, agent, actor=f"{ctx.user_name} via agent"[:64])
+    asyncio.get_running_loop().create_task(agents_route._run_audit(agent.id), name=f"audit-{agent.id}")
+    return {
+        "started": True,
+        "agent": agent.name,
+        "where": f"Agents page -> {agent.name}: live progress, results, Download CSV",
+        "note": "Runs in the background; it does not need this chat to stay open.",
+    }
+
+
+class AuditStatusArgs(BaseModel):
+    sheet_url: str = Field(description="The same Google Sheet link the audit was started with.")
+    target_domain: str = Field(default="all-bettors.com")
+
+
+async def backlink_audit_status(ctx: ToolContext, args: AuditStatusArgs) -> dict:
+    from app.api.routes import agents as agents_route
+    from app.models import BacklinkCheck
+
+    domain = args.target_domain.strip().lower().removeprefix("www.") or "all-bettors.com"
+    agent = _sheet_agent(ctx, args.sheet_url, domain)
+    if agent is None:
+        raise ToolError("No audit has been started for that sheet yet.")
+    state = agents_route._audits.get(agent.id, {})
+    counts: dict[str, int] = {}
+    for (result,) in ctx.db.execute(
+        select(BacklinkCheck.result).where(BacklinkCheck.agent_id == agent.id)
+    ):
+        counts[result] = counts.get(result, 0) + 1
+    return {
+        "agent": agent.name,
+        "status": state.get("status", "completed" if counts else "idle"),
+        "checked_so_far": state.get("done", sum(counts.values())),
+        "total": state.get("total", sum(counts.values())),
+        "results": counts,
+        "error": state.get("error"),
     }
 
 
@@ -514,6 +611,23 @@ TOOLS: dict[str, Tool] = {
             ),
             CheckBacklinksArgs,
             check_backlinks,
+        ),
+        Tool(
+            "start_backlink_audit",
+            (
+                "Check EVERY URL in a Google Sheet for a link to a domain, in the "
+                "background. Use this for whole sheets or more than 25 URLs; it "
+                "returns at once and the operator follows progress on the Agents page."
+            ),
+            StartAuditArgs,
+            start_backlink_audit,
+            requires_approval=True,
+        ),
+        Tool(
+            "backlink_audit_status",
+            "How far a background sheet audit has got, and its results so far.",
+            AuditStatusArgs,
+            backlink_audit_status,
         ),
         Tool(
             "search_leads",

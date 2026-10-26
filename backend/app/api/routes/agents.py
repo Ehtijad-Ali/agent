@@ -499,7 +499,14 @@ def start_audit(
             status_code=status.HTTP_409_CONFLICT, detail="An audit is already running."
         )
 
-    _audits[agent_id] = {
+    begin_audit(db, agent)
+    background.add_task(_run_audit, agent_id)
+    return get_audit(agent_id, db)
+
+
+def begin_audit(db: Session, agent: Agent, actor: str = ACTOR) -> None:
+    """Mark an audit as running and log it. The caller schedules _run_audit."""
+    _audits[agent.id] = {
         "status": "running",
         "total": 0,
         "done": 0,
@@ -507,10 +514,12 @@ def start_audit(
         "started_at": datetime.now(UTC),
         "finished_at": None,
     }
-    db.add(ActivityEntry(actor=ACTOR, action="started backlink audit", item=agent.name))
+    db.add(ActivityEntry(actor=actor, action="started backlink audit", item=agent.name))
     db.commit()
-    background.add_task(_run_audit, agent_id)
-    return get_audit(agent_id, db)
+
+
+def audit_running(agent_id: str) -> bool:
+    return _audits.get(agent_id, {}).get("status") == "running"
 
 
 @router.get("/{agent_id}/audit", response_model=BacklinkAuditOut)
